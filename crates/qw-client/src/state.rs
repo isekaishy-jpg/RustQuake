@@ -410,6 +410,16 @@ impl ClientState {
         }
     }
 
+    pub fn clear_frame_events(&mut self) {
+        self.particle_effects.clear();
+        self.temp_entities.clear();
+        self.nails.clear();
+        self.sound_events.clear();
+        self.stop_sounds.clear();
+        self.muzzle_flashes.clear();
+        self.damage_events.clear();
+    }
+
     pub fn store_outgoing_cmd(&mut self, sequence: u32, cmd: UserCmd) {
         let index = (sequence as usize) & UPDATE_MASK;
         self.frames[index].cmd = cmd;
@@ -1033,6 +1043,54 @@ mod tests {
                 origin: Vec3::new(4.0, 5.0, 6.0),
             }]
         );
+    }
+
+    #[test]
+    fn clears_frame_events() {
+        let mut state = ClientState::new();
+        state.particle_effects.push(qw_common::ParticleEffect {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            direction: Vec3::new(0.0, 0.0, 1.0),
+            count: 1,
+            color: 0,
+        });
+        state.temp_entities.push(qw_common::TempEntityMessage {
+            kind: qw_common::TE_SPIKE,
+            origin: Some(Vec3::new(1.0, 2.0, 3.0)),
+            start: None,
+            end: None,
+            count: None,
+            entity: None,
+        });
+        state.nails.push(qw_common::NailProjectile {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            angles: Vec3::new(0.0, 0.0, 0.0),
+        });
+        state.sound_events.push(qw_common::SoundMessage {
+            entity: 1,
+            channel: 0,
+            sound_num: 2,
+            volume: 255,
+            attenuation: 1.0,
+            origin: Vec3::new(0.0, 0.0, 0.0),
+        });
+        state.stop_sounds.push(StopSoundEvent { entity: 2, channel: 1 });
+        state.muzzle_flashes.push(3);
+        state.damage_events.push(DamageEvent {
+            armor: 1,
+            blood: 2,
+            origin: Vec3::new(4.0, 5.0, 6.0),
+        });
+
+        state.clear_frame_events();
+
+        assert!(state.particle_effects.is_empty());
+        assert!(state.temp_entities.is_empty());
+        assert!(state.nails.is_empty());
+        assert!(state.sound_events.is_empty());
+        assert!(state.stop_sounds.is_empty());
+        assert!(state.muzzle_flashes.is_empty());
+        assert!(state.damage_events.is_empty());
     }
 
     #[test]
