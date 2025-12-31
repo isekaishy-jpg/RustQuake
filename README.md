@@ -9,6 +9,18 @@ Rust port of QuakeWorld from https://github.com/id-Software/Quake.
 - crates/qw-server: server binary (WIP)
 - docs: notes on upstream and porting
 
+## Running the client
+The client expects local Quake data files. See `docs/data-paths.md` for how to
+point the client at your install.
+
+Example:
+```bash
+cargo run -p qw-client -- --connect 127.0.0.1:27500 --name unit
+```
+
+Optional flags include `--data-dir`, `--download-dir`, `--qport`, `--rate`,
+`--topcolor`, and `--bottomcolor`.
+
 ## Upstream
 See docs/upstream.md for the exact upstream commit.
 
