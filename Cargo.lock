@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "qw-audio"
+version = "0.1.0"
+
+[[package]]
 name = "qw-client"
 version = "0.1.0"
 dependencies = [
@@ -14,5 +18,13 @@ name = "qw-common"
 version = "0.1.0"
 
 [[package]]
+name = "qw-renderer-gl"
+version = "0.1.0"
+
+[[package]]
 name = "qw-server"
+version = "0.1.0"
+
+[[package]]
+name = "qw-window-glfw"
 version = "0.1.0"

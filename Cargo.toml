@@ -1,7 +1,10 @@
 [workspace]
 members = [
+  "crates/qw-audio",
   "crates/qw-common",
   "crates/qw-client",
+  "crates/qw-renderer-gl",
   "crates/qw-server",
+  "crates/qw-window-glfw",
 ]
 resolver = "2"

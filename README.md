@@ -6,6 +6,9 @@ Rust port of QuakeWorld from https://github.com/id-Software/Quake.
 - vendor/quake: upstream GPL source
 - crates/qw-common: shared Rust code
 - crates/qw-client: client binary (WIP)
+- crates/qw-renderer-gl: OpenGL renderer (WIP)
+- crates/qw-window-glfw: GLFW windowing (WIP)
+- crates/qw-audio: audio backend (WIP)
 - crates/qw-server: server binary (WIP)
 - docs: notes on upstream and porting
 

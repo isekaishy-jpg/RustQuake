@@ -12,6 +12,9 @@ Planned Rust outputs:
 - crates/qw-client (unified client binary, QW + singleplayer modes)
 - crates/qw-server (QuakeWorld server binary)
 - crates/qw-common (shared code)
+- crates/qw-renderer-gl (OpenGL renderer)
+- crates/qw-window-glfw (GLFW windowing)
+- crates/qw-audio (audio backend)
 
 Upstream roots (GL focus):
 - vendor/quake/WinQuake (GLQuake sources: gl_*.c, gl_*.h + client/server glue)
