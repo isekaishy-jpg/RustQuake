@@ -7,6 +7,7 @@ mod net;
 mod prediction;
 mod runner;
 mod session;
+mod sound;
 mod state;
 
 use std::collections::VecDeque;
@@ -19,6 +20,7 @@ use crate::input::{CommandTarget, InputBindings, InputState};
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
+use crate::sound::SoundManager;
 use qw_audio::{AudioConfig, AudioSystem};
 use qw_common::{InfoError, InfoString};
 use qw_renderer_gl::{GlRenderer, Renderer, RendererConfig};
@@ -82,7 +84,8 @@ fn run() -> Result<(), AppError> {
         height,
         ..RendererConfig::default()
     });
-    let audio = AudioSystem::new(AudioConfig::default());
+    let mut audio = AudioSystem::new(AudioConfig::default());
+    let mut sound_manager = SoundManager::new();
 
     let server_addr = std::net::SocketAddr::from(server.to_socket_addr());
     let net = NetClient::connect(server_addr)?;
@@ -159,6 +162,7 @@ fn run() -> Result<(), AppError> {
                 },
             }
         }
+        sound_manager.handle_events(&mut audio, &mut runner.state);
         update_window_title(&mut window, &runner.state.serverinfo, &mut last_title);
 
         if runner.session.state == SessionState::Connected {
