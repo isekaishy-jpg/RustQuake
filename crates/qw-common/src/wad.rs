@@ -124,18 +124,7 @@ impl Wad {
 }
 
 fn cleanup_name_str(name: &str) -> String {
-    let mut out = [0u8; 16];
-    let bytes = name.as_bytes();
-    let max_len = bytes.len().min(16);
-    for i in 0..max_len {
-        let mut c = bytes[i];
-        if c >= b'A' && c <= b'Z' {
-            c = c + (b'a' - b'A');
-        }
-        out[i] = c;
-    }
-    let trimmed_len = out.iter().position(|b| *b == 0).unwrap_or(16);
-    String::from_utf8_lossy(&out[..trimmed_len]).to_string()
+    cleanup_name_bytes(name.as_bytes())
 }
 
 fn cleanup_name_bytes(bytes: &[u8]) -> String {
@@ -143,8 +132,8 @@ fn cleanup_name_bytes(bytes: &[u8]) -> String {
     let max_len = bytes.len().min(16);
     for i in 0..max_len {
         let mut c = bytes[i];
-        if c >= b'A' && c <= b'Z' {
-            c = c + (b'a' - b'A');
+        if c.is_ascii_uppercase() {
+            c = c.to_ascii_lowercase();
         }
         out[i] = c;
     }

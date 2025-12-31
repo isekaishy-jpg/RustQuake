@@ -8,6 +8,7 @@ pub enum PcxError {
     UnsupportedFormat,
     UnexpectedEof,
     MissingPalette,
+    InvalidData,
     Palette(PaletteError),
 }
 
@@ -51,20 +52,34 @@ impl PcxImage {
         let mut indices = Vec::with_capacity(width * height);
         let mut offset = 128;
         for _ in 0..height {
-            let mut row = Vec::with_capacity(bytes_per_line);
-            while row.len() < bytes_per_line {
+            let mut row_len = 0usize;
+            while row_len < bytes_per_line {
                 let byte = *data.get(offset).ok_or(PcxError::UnexpectedEof)?;
                 offset += 1;
-                if byte & 0xc0 == 0xc0 {
+
+                let (count, value) = if byte & 0xc0 == 0xc0 {
                     let count = (byte & 0x3f) as usize;
+                    if count == 0 {
+                        return Err(PcxError::InvalidData);
+                    }
                     let value = *data.get(offset).ok_or(PcxError::UnexpectedEof)?;
                     offset += 1;
-                    row.extend(std::iter::repeat_n(value, count));
+                    (count, value)
                 } else {
-                    row.push(byte);
+                    (1, byte)
+                };
+
+                if row_len + count > bytes_per_line {
+                    return Err(PcxError::InvalidData);
                 }
+
+                let write_start = row_len.min(width);
+                let write_end = (row_len + count).min(width);
+                if write_start < write_end {
+                    indices.extend(std::iter::repeat_n(value, write_end - write_start));
+                }
+                row_len += count;
             }
-            indices.extend_from_slice(&row[..width]);
         }
 
         let palette = if data.len() >= 769 {
@@ -130,6 +145,22 @@ mod tests {
         data
     }
 
+    fn build_pcx_overrun() -> Vec<u8> {
+        let mut data = vec![0u8; 128];
+        data[0] = 0x0a;
+        data[1] = 5;
+        data[2] = 1;
+        data[3] = 8;
+        data[8..10].copy_from_slice(&0u16.to_le_bytes());
+        data[10..12].copy_from_slice(&0u16.to_le_bytes());
+        data[65] = 1;
+        data[66..68].copy_from_slice(&1u16.to_le_bytes());
+
+        data.extend_from_slice(&[0xc2, 0x01]);
+
+        data
+    }
+
     #[test]
     fn decodes_indices_and_palette() {
         let bytes = build_pcx_2x2();
@@ -141,5 +172,12 @@ mod tests {
         let rgba = pcx.expand_rgba(None).unwrap();
         assert_eq!(rgba[0..4], [10, 20, 30, 255]);
         assert_eq!(rgba[4..8], [40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn rejects_rle_overruns() {
+        let bytes = build_pcx_overrun();
+        let err = PcxImage::from_bytes(&bytes).unwrap_err();
+        assert!(matches!(err, PcxError::InvalidData));
     }
 }
