@@ -95,6 +95,7 @@ fn run() -> Result<(), AppError> {
     runner.start_connect()?;
 
     let mut last_move = Instant::now();
+    let mut last_title: Option<String> = None;
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
     let mut pending_cmds: VecDeque<String> = VecDeque::new();
@@ -148,6 +149,7 @@ fn run() -> Result<(), AppError> {
                 },
             }
         }
+        update_window_title(&mut window, &runner.state.serverinfo, &mut last_title);
 
         if runner.session.state == SessionState::Connected {
             was_connected = true;
@@ -319,6 +321,19 @@ fn handle_window_event(
     }
 }
 
+fn update_window_title(
+    window: &mut GlfwWindow,
+    serverinfo: &InfoString,
+    last_title: &mut Option<String>,
+) {
+    if let Some(hostname) = qw_common::value_for_key(serverinfo.as_str(), "hostname")
+        && last_title.as_deref() != Some(hostname.as_str())
+    {
+        window.set_title(format!("RustQuake - {hostname}"));
+        *last_title = Some(hostname);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +380,16 @@ mod tests {
         );
         assert!(exit);
         assert!(window.should_close());
+    }
+
+    #[test]
+    fn updates_window_title_from_hostname() {
+        let mut window = GlfwWindow::new(WindowConfig::default());
+        let mut info = InfoString::new(128);
+        info.set("hostname", "Unit").unwrap();
+        let mut last_title = None;
+        update_window_title(&mut window, &info, &mut last_title);
+        assert_eq!(window.config().title, "RustQuake - Unit");
+        assert_eq!(last_title.as_deref(), Some("Unit"));
     }
 }
