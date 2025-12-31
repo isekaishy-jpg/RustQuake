@@ -452,6 +452,13 @@ impl ClientState {
         self.center_prints.clear();
     }
 
+    pub fn mark_choked(&mut self, count: u8, acknowledged: u32) {
+        for offset in 0..count {
+            let index = (acknowledged.wrapping_sub(1 + offset as u32) as usize) & UPDATE_MASK;
+            self.frames[index].receivedtime = -2.0;
+        }
+    }
+
     pub fn store_outgoing_cmd(&mut self, sequence: u32, cmd: UserCmd) {
         let index = (sequence as usize) & UPDATE_MASK;
         self.frames[index].cmd = cmd;
@@ -1179,6 +1186,18 @@ mod tests {
         assert!(state.damage_events.is_empty());
         assert!(state.prints.is_empty());
         assert!(state.center_prints.is_empty());
+    }
+
+    #[test]
+    fn marks_choked_frames() {
+        let mut state = ClientState::new();
+        state.frames[2].receivedtime = 1.0;
+        state.frames[3].receivedtime = 1.0;
+
+        state.mark_choked(2, 4);
+
+        assert_eq!(state.frames[3].receivedtime, -2.0);
+        assert_eq!(state.frames[2].receivedtime, -2.0);
     }
 
     #[test]

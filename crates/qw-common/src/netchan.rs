@@ -149,6 +149,10 @@ impl Netchan {
         self.incoming_sequence
     }
 
+    pub fn incoming_acknowledged(&self) -> u32 {
+        self.incoming_acknowledged
+    }
+
     pub fn outgoing_sequence(&self) -> u32 {
         self.outgoing_sequence
     }

@@ -124,7 +124,11 @@ impl ClientRunner {
         if let ClientPacket::Messages(messages) = &parsed {
             self.state.clear_frame_events();
             let incoming_sequence = self.client.netchan.incoming_sequence();
+            let incoming_ack = self.client.netchan.incoming_acknowledged();
             for message in messages {
+                if let SvcMessage::ChokeCount(count) = message {
+                    self.state.mark_choked(*count, incoming_ack);
+                }
                 self.state.apply_message(message, incoming_sequence);
                 self.handle_signon(message)?;
             }
