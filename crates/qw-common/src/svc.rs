@@ -43,6 +43,13 @@ pub enum SvcMessage {
     FoundSecret,
     Sound(SoundMessage),
     StopSound { entity: u16, channel: u8 },
+    Download {
+        size: i16,
+        percent: u8,
+        data: Vec<u8>,
+    },
+    Nails { count: u8 },
+    ChokeCount(u8),
     UpdateFrags { slot: u8, frags: i16 },
     UpdatePing { slot: u8, ping: i16 },
     UpdatePl { slot: u8, packet_loss: u8 },
@@ -571,6 +578,28 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let channel = (field & 7) as u8;
             Ok(SvcMessage::StopSound { entity, channel })
         }
+        Svc::Download => {
+            let size = reader.read_i16()?;
+            let percent = reader.read_u8()?;
+            let data = if size > 0 {
+                reader.read_bytes(size as usize)?
+            } else {
+                Vec::new()
+            };
+            Ok(SvcMessage::Download { size, percent, data })
+        }
+        Svc::Nails => {
+            let count = reader.read_u8()?;
+            if count > 0 {
+                let bytes = count as usize * 6;
+                reader.skip(bytes)?;
+            }
+            Ok(SvcMessage::Nails { count })
+        }
+        Svc::ChokeCount => {
+            let count = reader.read_u8()?;
+            Ok(SvcMessage::ChokeCount(count))
+        }
         Svc::UpdateFrags => {
             let slot = reader.read_u8()?;
             let frags = reader.read_i16()?;
@@ -846,6 +875,27 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             buf.write_u8(Svc::StopSound as u8)?;
             let field = ((entity & 1023) << 3) | (*channel as u16 & 7);
             buf.write_u16(field)?;
+        }
+        SvcMessage::Download { size, percent, data } => {
+            buf.write_u8(Svc::Download as u8)?;
+            buf.write_i16(*size)?;
+            buf.write_u8(*percent)?;
+            if *size > 0 {
+                let count = (*size as usize).min(data.len());
+                buf.write_bytes(&data[..count])?;
+            }
+        }
+        SvcMessage::Nails { count } => {
+            buf.write_u8(Svc::Nails as u8)?;
+            buf.write_u8(*count)?;
+            let bytes = (*count as usize) * 6;
+            if bytes > 0 {
+                buf.write_bytes(&vec![0u8; bytes])?;
+            }
+        }
+        SvcMessage::ChokeCount(count) => {
+            buf.write_u8(Svc::ChokeCount as u8)?;
+            buf.write_u8(*count)?;
         }
         SvcMessage::UpdateFrags { slot, frags } => {
             buf.write_u8(Svc::UpdateFrags as u8)?;
@@ -1134,6 +1184,21 @@ mod tests {
         let mut reader = MsgReader::new(buf.as_slice());
         let msg = parse_svc_message(&mut reader).unwrap();
         assert_eq!(msg, SvcMessage::Sound(sound));
+    }
+
+    #[test]
+    fn parses_download_chunk() {
+        let chunk = SvcMessage::Download {
+            size: 2,
+            percent: 50,
+            data: vec![1, 2],
+        };
+        let mut buf = SizeBuf::new(32);
+        write_svc_message(&mut buf, &chunk).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, chunk);
     }
 
     #[test]

@@ -310,6 +310,14 @@ impl<'a> MsgReader<'a> {
         Ok(String::from_utf8_lossy(&out).to_string())
     }
 
+    pub fn read_bytes(&mut self, count: usize) -> Result<Vec<u8>, MsgReadError> {
+        Ok(self.take(count)?.to_vec())
+    }
+
+    pub fn skip(&mut self, count: usize) -> Result<(), MsgReadError> {
+        self.take(count).map(|_| ())
+    }
+
     pub fn read_coord(&mut self) -> Result<f32, MsgReadError> {
         Ok(self.read_i16()? as f32 * (1.0 / 8.0))
     }
@@ -434,5 +442,20 @@ mod tests {
         assert!((decoded.angles.x - cmd.angles.x).abs() < 0.2);
         assert!((decoded.angles.y - cmd.angles.y).abs() < 0.2);
         assert!((decoded.angles.z - cmd.angles.z).abs() < 0.2);
+    }
+
+    #[test]
+    fn reads_and_skips_bytes() {
+        let mut buf = SizeBuf::new(16);
+        buf.write_u8(1).unwrap();
+        buf.write_u8(2).unwrap();
+        buf.write_u8(3).unwrap();
+        buf.write_u8(4).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let bytes = reader.read_bytes(2).unwrap();
+        assert_eq!(bytes, vec![1, 2]);
+        reader.skip(1).unwrap();
+        assert_eq!(reader.read_u8().unwrap(), 4);
     }
 }
