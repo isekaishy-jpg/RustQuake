@@ -107,6 +107,45 @@ impl Sprite {
 
         Ok(Sprite { header, frames })
     }
+
+    pub fn frame_at_time(&self, index: usize, time: f32) -> Option<&SpriteImage> {
+        let frame = self.frames.get(index)?;
+        frame.image_at_time(time)
+    }
+}
+
+impl SpriteFrame {
+    pub fn image_at_time(&self, time: f32) -> Option<&SpriteImage> {
+        match self {
+            SpriteFrame::Single(frame) => Some(frame),
+            SpriteFrame::Group { intervals, frames } => {
+                if frames.is_empty() {
+                    return None;
+                }
+                if intervals.is_empty() {
+                    return frames.first();
+                }
+
+                let total: f32 = intervals.iter().sum();
+                if total <= 0.0 {
+                    return frames.first();
+                }
+                let mut t = time % total;
+                if t < 0.0 {
+                    t += total;
+                }
+                let count = intervals.len().min(frames.len());
+                for idx in 0..count {
+                    let interval = intervals[idx];
+                    if t < interval {
+                        return frames.get(idx);
+                    }
+                    t -= interval;
+                }
+                frames.first()
+            }
+        }
+    }
 }
 
 impl SpriteImage {
@@ -243,5 +282,29 @@ mod tests {
         };
         let rgba = image.expand_rgba(&palette);
         assert_eq!(rgba, vec![5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn selects_group_frame_by_time() {
+        let frame_a = SpriteImage {
+            width: 1,
+            height: 1,
+            origin: (0, 0),
+            pixels: vec![1],
+        };
+        let frame_b = SpriteImage {
+            width: 1,
+            height: 1,
+            origin: (0, 0),
+            pixels: vec![2],
+        };
+        let group = SpriteFrame::Group {
+            intervals: vec![0.1, 0.2],
+            frames: vec![frame_a.clone(), frame_b.clone()],
+        };
+
+        assert_eq!(group.image_at_time(0.05).unwrap().pixels[0], 1);
+        assert_eq!(group.image_at_time(0.15).unwrap().pixels[0], 2);
+        assert_eq!(group.image_at_time(0.35).unwrap().pixels[0], 1);
     }
 }

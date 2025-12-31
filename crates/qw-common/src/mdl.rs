@@ -137,6 +137,11 @@ impl AliasModel {
             frames,
         })
     }
+
+    pub fn frame_at_time(&self, index: usize, time: f32) -> Option<&MdlFrame> {
+        let group = self.frames.get(index)?;
+        group.frame_at_time(time)
+    }
 }
 
 impl MdlSkin {
@@ -147,6 +152,40 @@ impl MdlSkin {
                 .iter()
                 .map(|indices| palette.expand_indices(indices, Some(255)))
                 .collect(),
+        }
+    }
+}
+
+impl MdlFrameGroup {
+    pub fn frame_at_time(&self, time: f32) -> Option<&MdlFrame> {
+        match self {
+            MdlFrameGroup::Single(frame) => Some(frame),
+            MdlFrameGroup::Group { intervals, frames } => {
+                if frames.is_empty() {
+                    return None;
+                }
+                if intervals.is_empty() {
+                    return frames.first();
+                }
+
+                let total: f32 = intervals.iter().sum();
+                if total <= 0.0 {
+                    return frames.first();
+                }
+                let mut t = time % total;
+                if t < 0.0 {
+                    t += total;
+                }
+                let count = intervals.len().min(frames.len());
+                for idx in 0..count {
+                    let interval = intervals[idx];
+                    if t < interval {
+                        return frames.get(idx);
+                    }
+                    t -= interval;
+                }
+                frames.first()
+            }
         }
     }
 }
@@ -426,5 +465,25 @@ mod tests {
         };
         let rgba = skin.expand_rgba(&palette);
         assert_eq!(rgba[0], vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn selects_group_frame_by_time() {
+        let frame_a = MdlFrame {
+            name: "a".to_string(),
+            vertices: Vec::new(),
+        };
+        let frame_b = MdlFrame {
+            name: "b".to_string(),
+            vertices: Vec::new(),
+        };
+        let group = MdlFrameGroup::Group {
+            intervals: vec![0.1, 0.2],
+            frames: vec![frame_a, frame_b],
+        };
+
+        assert_eq!(group.frame_at_time(0.05).unwrap().name, "a");
+        assert_eq!(group.frame_at_time(0.15).unwrap().name, "b");
+        assert_eq!(group.frame_at_time(0.35).unwrap().name, "a");
     }
 }
