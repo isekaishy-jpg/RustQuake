@@ -634,8 +634,8 @@ mod tests {
     use super::*;
     use crate::session::SessionState;
     use qw_common::{
-        Clc, MsgReader, Netchan, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf, SvcMessage,
-        UserCmd, Vec3, build_out_of_band, out_of_band_payload,
+        Clc, MsgReader, Netchan, NetchanHeader, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf,
+        SvcMessage, UserCmd, Vec3, build_out_of_band, out_of_band_payload,
     };
     use std::net::UdpSocket;
     use std::sync::Mutex;
@@ -738,6 +738,55 @@ mod tests {
 
         assert_eq!(runner.state.players[0].user_id, 7);
         assert!(runner.state.frames[0].receivedtime >= 0.0);
+    }
+
+    #[test]
+    fn updates_latency_from_acked_frame() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let senttime = 0.001;
+        runner.state.frames[0].senttime = senttime;
+        std::thread::sleep(Duration::from_millis(5));
+
+        let header = NetchanHeader {
+            sequence: 1,
+            reliable: false,
+            ack: 0,
+            ack_reliable: false,
+            qport: None,
+        };
+        let mut buf = SizeBuf::new(16);
+        header.write(&mut buf).unwrap();
+        let packet = buf.as_slice();
+
+        let local_port = runner.net.local_addr().unwrap().port();
+        server
+            .send_to(
+                packet,
+                std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
+            )
+            .unwrap();
+
+        let mut client_buf = [0u8; 64];
+        for _ in 0..10 {
+            let _ = runner.poll_once(&mut client_buf).unwrap();
+            if runner.state.latency > 0.0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(runner.state.latency > 0.0);
+        assert_eq!(runner.state.parsecount_time, Some(senttime));
     }
 
     #[test]
