@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crate::client::{Client, ClientPacket};
 use crate::net::NetClient;
@@ -8,7 +9,8 @@ use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
     clc, find_game_dir, find_id1_dir, locate_data_dir, Bsp, BspError, DataPathError, FsError,
-    NetchanError, OobMessage, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UserCmd,
+    NetchanError, OobMessage, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP,
+    UPDATE_MASK, UserCmd,
 };
 use std::path::PathBuf;
 
@@ -73,6 +75,7 @@ pub struct ClientRunner {
     pub session: Session,
     pub client: Client,
     pub state: ClientState,
+    start_time: Instant,
     fs_game_dir: Option<String>,
     data_dir: Option<PathBuf>,
     download_queue: VecDeque<String>,
@@ -88,6 +91,7 @@ impl ClientRunner {
             session,
             client: Client::new(qport),
             state: ClientState::new(),
+            start_time: Instant::now(),
             fs_game_dir: None,
             data_dir: None,
             download_queue: VecDeque::new(),
@@ -125,6 +129,9 @@ impl ClientRunner {
             self.state.clear_frame_events();
             let incoming_sequence = self.client.netchan.incoming_sequence();
             let incoming_ack = self.client.netchan.incoming_acknowledged();
+            let now = self.start_time.elapsed().as_secs_f64();
+            let ack_index = (incoming_ack as usize) & UPDATE_MASK;
+            self.state.frames[ack_index].receivedtime = now;
             for message in messages {
                 if let SvcMessage::ChokeCount(count) = message {
                     self.state.mark_choked(*count, incoming_ack);
@@ -144,6 +151,9 @@ impl ClientRunner {
 
         let sequence = self.client.netchan.outgoing_sequence();
         self.state.store_outgoing_cmd(sequence, cmd);
+        let now = self.start_time.elapsed().as_secs_f64();
+        let index = (sequence as usize) & UPDATE_MASK;
+        self.state.frames[index].senttime = now;
 
         if self.state.valid_sequence != 0
             && sequence.wrapping_sub(self.state.valid_sequence as u32)
@@ -661,6 +671,7 @@ mod tests {
         }
 
         assert_eq!(runner.state.players[0].user_id, 7);
+        assert!(runner.state.frames[0].receivedtime >= 0.0);
     }
 
     #[test]
