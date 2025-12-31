@@ -201,7 +201,11 @@ impl ClientState {
             }
             SvcMessage::SetInfo { slot, key, value } => {
                 if let Some(player) = self.players.get_mut(*slot as usize) {
-                    let _ = player.userinfo.set(key, value);
+                    if key.starts_with('*') {
+                        let _ = player.userinfo.set_star(key, value);
+                    } else {
+                        let _ = player.userinfo.set(key, value);
+                    }
                 }
             }
             SvcMessage::UpdateName { slot, name } => {
@@ -218,7 +222,11 @@ impl ClientState {
                 }
             }
             SvcMessage::ServerInfo { key, value } => {
-                let _ = self.serverinfo.set(key, value);
+                if key.starts_with('*') {
+                    let _ = self.serverinfo.set_star(key, value);
+                } else {
+                    let _ = self.serverinfo.set(key, value);
+                }
             }
             SvcMessage::UpdateFrags { slot, frags } => {
                 if let Some(player) = self.players.get_mut(*slot as usize) {
@@ -647,7 +655,17 @@ mod tests {
             },
             0,
         );
-        assert!(state.players[2].userinfo.as_str().contains("\\team\\red"));
+        state.apply_message(
+            &SvcMessage::SetInfo {
+                slot: 2,
+                key: "*spectator".to_string(),
+                value: "1".to_string(),
+            },
+            0,
+        );
+        let info = state.players[2].userinfo.as_str();
+        assert!(info.contains("\\team\\red"));
+        assert!(info.contains("\\*spectator\\1"));
     }
 
     #[test]
@@ -683,7 +701,16 @@ mod tests {
             },
             0,
         );
-        assert!(state.serverinfo.as_str().contains("\\hostname\\server"));
+        state.apply_message(
+            &SvcMessage::ServerInfo {
+                key: "*version".to_string(),
+                value: "1.0".to_string(),
+            },
+            0,
+        );
+        let info = state.serverinfo.as_str();
+        assert!(info.contains("\\hostname\\server"));
+        assert!(info.contains("\\*version\\1.0"));
     }
 
     #[test]
