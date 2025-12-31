@@ -40,6 +40,7 @@ pub struct RenderVertex {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderSurface {
     pub vertices: Vec<RenderVertex>,
+    pub indices: Vec<u32>,
     pub texture_name: Option<String>,
 }
 
@@ -152,12 +153,28 @@ fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
             .collect::<Vec<_>>();
 
         let texture_name = texture_name_for_face(bsp, face);
+        let indices = triangulate_fan(vertices.len());
         surfaces.push(RenderSurface {
             vertices,
+            indices,
             texture_name,
         });
     }
     surfaces
+}
+
+fn triangulate_fan(vertex_count: usize) -> Vec<u32> {
+    if vertex_count < 3 {
+        return Vec::new();
+    }
+
+    let mut indices = Vec::with_capacity((vertex_count - 2) * 3);
+    for i in 1..(vertex_count - 1) {
+        indices.push(0);
+        indices.push(i as u32);
+        indices.push((i + 1) as u32);
+    }
+    indices
 }
 
 fn build_textures(bsp: &BspRender, palette: Option<&Palette>) -> Vec<RenderTexture> {
@@ -300,6 +317,7 @@ mod tests {
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
         assert_eq!(world.surfaces.len(), 1);
         assert_eq!(world.surfaces[0].vertices.len(), 4);
+        assert_eq!(world.surfaces[0].indices, vec![0, 1, 2, 0, 2, 3]);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
     }
 
