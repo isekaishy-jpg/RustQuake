@@ -4,18 +4,45 @@ use crate::client_messages::{parse_serverdata, parse_string_list_chunk, ServerDa
 use crate::msg::{MsgReadError, MsgReader, SizeBuf, SizeBufError};
 use crate::protocol::{
     Svc, PF_COMMAND, PF_EFFECTS, PF_MSEC, PF_MODEL, PF_SKINNUM, PF_VELOCITY1, PF_VELOCITY2,
-    PF_VELOCITY3, PF_WEAPONFRAME, U_ANGLE1, U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS,
-    U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1, U_ORIGIN2, U_ORIGIN3, U_REMOVE, U_SKIN, U_SOLID,
+    PF_VELOCITY3, PF_WEAPONFRAME, DEFAULT_SOUND_PACKET_ATTENUATION,
+    DEFAULT_SOUND_PACKET_VOLUME, SND_ATTENUATION, SND_VOLUME, U_ANGLE1, U_ANGLE2, U_ANGLE3,
+    U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1, U_ORIGIN2, U_ORIGIN3,
+    U_REMOVE, U_SKIN, U_SOLID,
 };
 use crate::types::{EntityState, UserCmd, Vec3};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SvcMessage {
+    Nop,
+    Disconnect,
     ServerData(ServerData),
     Print { level: u8, message: String },
+    CenterPrint(String),
     StuffText(String),
     SoundList(StringListChunk),
     ModelList(StringListChunk),
+    LightStyle { style: u8, value: String },
+    SetView { entity: u16 },
+    SetAngle(Vec3),
+    Damage { armor: u8, blood: u8, origin: Vec3 },
+    SetPause(bool),
+    SpawnStatic(EntityState),
+    SpawnStaticSound {
+        origin: Vec3,
+        sound: u8,
+        volume: u8,
+        attenuation: u8,
+    },
+    Intermission { origin: Vec3, angles: Vec3 },
+    Finale(String),
+    CdTrack(u8),
+    MuzzleFlash { entity: u16 },
+    UpdateStat { index: u8, value: u8 },
+    UpdateStatLong { index: u8, value: i32 },
+    KilledMonster,
+    FoundSecret,
+    Sound(SoundMessage),
+    StopSound { entity: u16, channel: u8 },
     UpdateFrags { slot: u8, frags: i16 },
     UpdatePing { slot: u8, ping: i16 },
     UpdatePl { slot: u8, packet_loss: u8 },
@@ -55,6 +82,16 @@ pub struct PlayerInfoMessage {
     pub skin_num: Option<u8>,
     pub effects: Option<u8>,
     pub weapon_frame: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundMessage {
+    pub entity: u16,
+    pub channel: u8,
+    pub sound_num: u8,
+    pub volume: u8,
+    pub attenuation: f32,
+    pub origin: Vec3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +252,38 @@ fn parse_baseline(reader: &mut MsgReader) -> Result<EntityState, MsgReadError> {
         colormap,
         skinnum,
         effects: 0,
+    })
+}
+
+fn parse_sound(reader: &mut MsgReader) -> Result<SoundMessage, MsgReadError> {
+    let field = reader.read_u16()?;
+    let volume = if field & SND_VOLUME != 0 {
+        reader.read_u8()?
+    } else {
+        DEFAULT_SOUND_PACKET_VOLUME
+    };
+    let attenuation = if field & SND_ATTENUATION != 0 {
+        reader.read_u8()? as f32 / 64.0
+    } else {
+        DEFAULT_SOUND_PACKET_ATTENUATION
+    };
+    let sound_num = reader.read_u8()?;
+    let origin = Vec3::new(
+        reader.read_coord()?,
+        reader.read_coord()?,
+        reader.read_coord()?,
+    );
+
+    let entity = ((field >> 3) & 1023) as u16;
+    let channel = (field & 7) as u8;
+
+    Ok(SoundMessage {
+        entity,
+        channel,
+        sound_num,
+        volume,
+        attenuation,
+        origin,
     })
 }
 
@@ -380,6 +449,8 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
     let cmd = reader.read_u8()?;
     let svc = Svc::try_from(cmd).map_err(|_| SvcParseError::UnknownSvc(cmd))?;
     match svc {
+        Svc::Nop => Ok(SvcMessage::Nop),
+        Svc::Disconnect => Ok(SvcMessage::Disconnect),
         Svc::ServerData => Ok(SvcMessage::ServerData(parse_serverdata(reader).map_err(|err| {
             match err {
                 crate::client_messages::ServerDataError::Read(e) => SvcParseError::Read(e),
@@ -391,12 +462,115 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let message = reader.read_string()?;
             Ok(SvcMessage::Print { level, message })
         }
+        Svc::CenterPrint => {
+            let message = reader.read_string()?;
+            Ok(SvcMessage::CenterPrint(message))
+        }
         Svc::StuffText => {
             let text = reader.read_string()?;
             Ok(SvcMessage::StuffText(text))
         }
         Svc::SoundList => Ok(SvcMessage::SoundList(parse_string_list_chunk(reader)?)),
         Svc::ModelList => Ok(SvcMessage::ModelList(parse_string_list_chunk(reader)?)),
+        Svc::LightStyle => {
+            let style = reader.read_u8()?;
+            let value = reader.read_string()?;
+            Ok(SvcMessage::LightStyle { style, value })
+        }
+        Svc::SetView => {
+            let entity = reader.read_u16()?;
+            Ok(SvcMessage::SetView { entity })
+        }
+        Svc::SetAngle => {
+            let angles = Vec3::new(
+                reader.read_angle()?,
+                reader.read_angle()?,
+                reader.read_angle()?,
+            );
+            Ok(SvcMessage::SetAngle(angles))
+        }
+        Svc::Damage => {
+            let armor = reader.read_u8()?;
+            let blood = reader.read_u8()?;
+            let origin = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            Ok(SvcMessage::Damage {
+                armor,
+                blood,
+                origin,
+            })
+        }
+        Svc::SetPause => {
+            let paused = reader.read_u8()? != 0;
+            Ok(SvcMessage::SetPause(paused))
+        }
+        Svc::SpawnStatic => {
+            let baseline = parse_baseline(reader)?;
+            Ok(SvcMessage::SpawnStatic(baseline))
+        }
+        Svc::SpawnStaticSound => {
+            let origin = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            let sound = reader.read_u8()?;
+            let volume = reader.read_u8()?;
+            let attenuation = reader.read_u8()?;
+            Ok(SvcMessage::SpawnStaticSound {
+                origin,
+                sound,
+                volume,
+                attenuation,
+            })
+        }
+        Svc::Intermission => {
+            let origin = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            let angles = Vec3::new(
+                reader.read_angle()?,
+                reader.read_angle()?,
+                reader.read_angle()?,
+            );
+            Ok(SvcMessage::Intermission { origin, angles })
+        }
+        Svc::Finale => {
+            let text = reader.read_string()?;
+            Ok(SvcMessage::Finale(text))
+        }
+        Svc::CdTrack => {
+            let track = reader.read_u8()?;
+            Ok(SvcMessage::CdTrack(track))
+        }
+        Svc::MuzzleFlash => {
+            let entity = reader.read_u16()?;
+            Ok(SvcMessage::MuzzleFlash { entity })
+        }
+        Svc::UpdateStat => {
+            let index = reader.read_u8()?;
+            let value = reader.read_u8()?;
+            Ok(SvcMessage::UpdateStat { index, value })
+        }
+        Svc::UpdateStatLong => {
+            let index = reader.read_u8()?;
+            let value = reader.read_i32()?;
+            Ok(SvcMessage::UpdateStatLong { index, value })
+        }
+        Svc::KilledMonster => Ok(SvcMessage::KilledMonster),
+        Svc::FoundSecret => Ok(SvcMessage::FoundSecret),
+        Svc::Sound => Ok(SvcMessage::Sound(parse_sound(reader)?)),
+        Svc::StopSound => {
+            let field = reader.read_u16()?;
+            let entity = ((field >> 3) & 1023) as u16;
+            let channel = (field & 7) as u8;
+            Ok(SvcMessage::StopSound { entity, channel })
+        }
         Svc::UpdateFrags => {
             let slot = reader.read_u8()?;
             let frags = reader.read_i16()?;
@@ -529,6 +703,12 @@ pub fn parse_svc_stream(reader: &mut MsgReader) -> Result<Vec<SvcMessage>, SvcPa
 
 pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), SizeBufError> {
     match message {
+        SvcMessage::Nop => {
+            buf.write_u8(Svc::Nop as u8)?;
+        }
+        SvcMessage::Disconnect => {
+            buf.write_u8(Svc::Disconnect as u8)?;
+        }
         SvcMessage::ServerData(data) => {
             buf.write_u8(Svc::ServerData as u8)?;
             crate::client_messages::write_serverdata(buf, data)?;
@@ -537,6 +717,10 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             buf.write_u8(Svc::Print as u8)?;
             buf.write_u8(*level)?;
             buf.write_string(Some(message))?;
+        }
+        SvcMessage::CenterPrint(text) => {
+            buf.write_u8(Svc::CenterPrint as u8)?;
+            buf.write_string(Some(text))?;
         }
         SvcMessage::StuffText(text) => {
             buf.write_u8(Svc::StuffText as u8)?;
@@ -549,6 +733,119 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
         SvcMessage::ModelList(chunk) => {
             buf.write_u8(Svc::ModelList as u8)?;
             crate::client_messages::write_string_list_chunk(buf, chunk)?;
+        }
+        SvcMessage::LightStyle { style, value } => {
+            buf.write_u8(Svc::LightStyle as u8)?;
+            buf.write_u8(*style)?;
+            buf.write_string(Some(value))?;
+        }
+        SvcMessage::SetView { entity } => {
+            buf.write_u8(Svc::SetView as u8)?;
+            buf.write_u16(*entity)?;
+        }
+        SvcMessage::SetAngle(angles) => {
+            buf.write_u8(Svc::SetAngle as u8)?;
+            buf.write_angle(angles.x)?;
+            buf.write_angle(angles.y)?;
+            buf.write_angle(angles.z)?;
+        }
+        SvcMessage::Damage {
+            armor,
+            blood,
+            origin,
+        } => {
+            buf.write_u8(Svc::Damage as u8)?;
+            buf.write_u8(*armor)?;
+            buf.write_u8(*blood)?;
+            buf.write_coord(origin.x)?;
+            buf.write_coord(origin.y)?;
+            buf.write_coord(origin.z)?;
+        }
+        SvcMessage::SetPause(paused) => {
+            buf.write_u8(Svc::SetPause as u8)?;
+            buf.write_u8(if *paused { 1 } else { 0 })?;
+        }
+        SvcMessage::SpawnStatic(baseline) => {
+            buf.write_u8(Svc::SpawnStatic as u8)?;
+            write_baseline(buf, baseline)?;
+        }
+        SvcMessage::SpawnStaticSound {
+            origin,
+            sound,
+            volume,
+            attenuation,
+        } => {
+            buf.write_u8(Svc::SpawnStaticSound as u8)?;
+            buf.write_coord(origin.x)?;
+            buf.write_coord(origin.y)?;
+            buf.write_coord(origin.z)?;
+            buf.write_u8(*sound)?;
+            buf.write_u8(*volume)?;
+            buf.write_u8(*attenuation)?;
+        }
+        SvcMessage::Intermission { origin, angles } => {
+            buf.write_u8(Svc::Intermission as u8)?;
+            buf.write_coord(origin.x)?;
+            buf.write_coord(origin.y)?;
+            buf.write_coord(origin.z)?;
+            buf.write_angle(angles.x)?;
+            buf.write_angle(angles.y)?;
+            buf.write_angle(angles.z)?;
+        }
+        SvcMessage::Finale(text) => {
+            buf.write_u8(Svc::Finale as u8)?;
+            buf.write_string(Some(text))?;
+        }
+        SvcMessage::CdTrack(track) => {
+            buf.write_u8(Svc::CdTrack as u8)?;
+            buf.write_u8(*track)?;
+        }
+        SvcMessage::MuzzleFlash { entity } => {
+            buf.write_u8(Svc::MuzzleFlash as u8)?;
+            buf.write_u16(*entity)?;
+        }
+        SvcMessage::UpdateStat { index, value } => {
+            buf.write_u8(Svc::UpdateStat as u8)?;
+            buf.write_u8(*index)?;
+            buf.write_u8(*value)?;
+        }
+        SvcMessage::UpdateStatLong { index, value } => {
+            buf.write_u8(Svc::UpdateStatLong as u8)?;
+            buf.write_u8(*index)?;
+            buf.write_i32(*value)?;
+        }
+        SvcMessage::KilledMonster => {
+            buf.write_u8(Svc::KilledMonster as u8)?;
+        }
+        SvcMessage::FoundSecret => {
+            buf.write_u8(Svc::FoundSecret as u8)?;
+        }
+        SvcMessage::Sound(sound) => {
+            buf.write_u8(Svc::Sound as u8)?;
+            let mut field = ((sound.entity as u16) << 3) | (sound.channel as u16 & 7);
+            if sound.volume != DEFAULT_SOUND_PACKET_VOLUME {
+                field |= SND_VOLUME;
+            }
+            if (sound.attenuation - DEFAULT_SOUND_PACKET_ATTENUATION).abs() > f32::EPSILON {
+                field |= SND_ATTENUATION;
+            }
+            buf.write_u16(field)?;
+            if field & SND_VOLUME != 0 {
+                buf.write_u8(sound.volume)?;
+            }
+            if field & SND_ATTENUATION != 0 {
+                let raw = (sound.attenuation * 64.0).round().clamp(0.0, 255.0);
+                buf.write_u8(raw as u8)?;
+            }
+            buf.write_u8(sound.sound_num)?;
+            buf.write_coord(sound.origin.x)?;
+            buf.write_coord(sound.origin.y)?;
+            buf.write_coord(sound.origin.z)?;
+        }
+        SvcMessage::StopSound { entity, channel } => {
+            buf.write_u8(Svc::StopSound as u8)?;
+            let field = ((entity & 1023) << 3) | (*channel as u16 & 7);
+            buf.write_u16(field)?;
         }
         SvcMessage::UpdateFrags { slot, frags } => {
             buf.write_u8(Svc::UpdateFrags as u8)?;
@@ -771,6 +1068,72 @@ mod tests {
                 frags: 15
             }
         );
+    }
+
+    #[test]
+    fn parses_setview_and_setangle() {
+        let quantize_angle8 = |value: f32| {
+            let scaled = ((value * 256.0 / 360.0) as i32) & 0xFF;
+            let stored = scaled as i8;
+            stored as f32 * (360.0 / 256.0)
+        };
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(&mut buf, &SvcMessage::SetView { entity: 12 }).unwrap();
+        write_svc_message(&mut buf, &SvcMessage::SetAngle(Vec3::new(1.0, 2.0, 3.0))).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::SetView { entity: 12 });
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(
+            msg,
+            SvcMessage::SetAngle(Vec3::new(
+                quantize_angle8(1.0),
+                quantize_angle8(2.0),
+                quantize_angle8(3.0)
+            ))
+        );
+    }
+
+    #[test]
+    fn parses_lightstyle() {
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(
+            &mut buf,
+            &SvcMessage::LightStyle {
+                style: 2,
+                value: "abc".to_string(),
+            },
+        )
+        .unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(
+            msg,
+            SvcMessage::LightStyle {
+                style: 2,
+                value: "abc".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_sound_message_defaults() {
+        let sound = SoundMessage {
+            entity: 5,
+            channel: 2,
+            sound_num: 7,
+            volume: DEFAULT_SOUND_PACKET_VOLUME,
+            attenuation: DEFAULT_SOUND_PACKET_ATTENUATION,
+            origin: Vec3::new(1.0, 2.0, 3.0),
+        };
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(&mut buf, &SvcMessage::Sound(sound.clone())).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::Sound(sound));
     }
 
     #[test]

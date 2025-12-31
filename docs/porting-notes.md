@@ -15,6 +15,7 @@ Current groundwork:
 - Client move message builder (clc_move + checksum + delta request) + stringcmd helper
 - Client runner send path for clc_move/clc_stringcmd with delta tracking
 - Signon scaffolding: auto requests soundlist/modellist and prespawn after serverdata
+- Added parsing for common svc messages (setview/setangle/lightstyle/sound/stats/etc.)
 - Info string helpers and COM_Parse tokenizer
 - Client handshake scaffolding (getchallenge/connect helpers + UDP loopback tests)
 - Client state model for userinfo/serverinfo + player updates + scoreboard fields + packet entity frame apply

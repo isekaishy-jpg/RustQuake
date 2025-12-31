@@ -192,6 +192,12 @@ pub const U_SKIN: u8 = 1 << 4;
 pub const U_EFFECTS: u8 = 1 << 5;
 pub const U_SOLID: u8 = 1 << 6;
 
+pub const SND_VOLUME: u16 = 1 << 15;
+pub const SND_ATTENUATION: u16 = 1 << 14;
+
+pub const DEFAULT_SOUND_PACKET_VOLUME: u8 = 255;
+pub const DEFAULT_SOUND_PACKET_ATTENUATION: f32 = 1.0;
+
 pub const MAX_CLIENTS: usize = 32;
 pub const UPDATE_BACKUP: usize = 64;
 pub const UPDATE_MASK: usize = UPDATE_BACKUP - 1;

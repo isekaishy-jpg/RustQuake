@@ -1,7 +1,8 @@
 use qw_common::{
-    EntityState, Frame, InfoString, MAX_CLIENTS, MAX_EDICTS, MAX_INFO_STRING,
-    MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities, PacketEntitiesUpdate, ServerData,
-    StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
+    EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS, MAX_INFO_STRING,
+    MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities,
+    PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_MONSTERS, STAT_SECRETS,
+    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,10 @@ pub struct ClientState {
     pub models: Vec<String>,
     pub next_sound: Option<u8>,
     pub next_model: Option<u8>,
+    pub view_entity: Option<u16>,
+    pub view_angles: Vec3,
+    pub stats: [i32; MAX_CL_STATS],
+    pub lightstyles: Vec<String>,
     pub baselines: Vec<EntityState>,
     pub frames: Vec<Frame>,
     pub valid_sequence: i32,
@@ -65,6 +70,10 @@ impl ClientState {
             models: Vec::new(),
             next_sound: None,
             next_model: None,
+            view_entity: None,
+            view_angles: Vec3::default(),
+            stats: [0; MAX_CL_STATS],
+            lightstyles: vec![String::new(); MAX_LIGHTSTYLES],
             baselines,
             frames,
             valid_sequence: 0,
@@ -135,6 +144,36 @@ impl ClientState {
             SvcMessage::ModelList(chunk) => {
                 apply_string_list(&mut self.models, chunk);
                 self.next_model = if chunk.next == 0 { None } else { Some(chunk.next) };
+            }
+            SvcMessage::SetView { entity } => {
+                self.view_entity = Some(*entity);
+            }
+            SvcMessage::SetAngle(angles) => {
+                self.view_angles = *angles;
+            }
+            SvcMessage::LightStyle { style, value } => {
+                let index = *style as usize;
+                if index < self.lightstyles.len() {
+                    self.lightstyles[index] = value.clone();
+                }
+            }
+            SvcMessage::UpdateStat { index, value } => {
+                let idx = *index as usize;
+                if idx < self.stats.len() {
+                    self.stats[idx] = *value as i32;
+                }
+            }
+            SvcMessage::UpdateStatLong { index, value } => {
+                let idx = *index as usize;
+                if idx < self.stats.len() {
+                    self.stats[idx] = *value;
+                }
+            }
+            SvcMessage::KilledMonster => {
+                self.stats[STAT_MONSTERS] += 1;
+            }
+            SvcMessage::FoundSecret => {
+                self.stats[STAT_SECRETS] += 1;
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -607,6 +646,44 @@ mod tests {
         assert_eq!(state.models.len(), 3);
         assert_eq!(state.models[2], "model3");
         assert_eq!(state.next_model, None);
+    }
+
+    #[test]
+    fn applies_view_and_stats() {
+        let mut state = ClientState::new();
+        state.apply_message(&SvcMessage::SetView { entity: 12 }, 0);
+        state.apply_message(&SvcMessage::SetAngle(Vec3::new(1.0, 2.0, 3.0)), 0);
+        state.apply_message(
+            &SvcMessage::LightStyle {
+                style: 2,
+                value: "abc".to_string(),
+            },
+            0,
+        );
+        state.apply_message(
+            &SvcMessage::UpdateStat {
+                index: 4,
+                value: 11,
+            },
+            0,
+        );
+        state.apply_message(
+            &SvcMessage::UpdateStatLong {
+                index: 5,
+                value: 1024,
+            },
+            0,
+        );
+        state.apply_message(&SvcMessage::KilledMonster, 0);
+        state.apply_message(&SvcMessage::FoundSecret, 0);
+
+        assert_eq!(state.view_entity, Some(12));
+        assert_eq!(state.view_angles, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(state.lightstyles[2], "abc");
+        assert_eq!(state.stats[4], 11);
+        assert_eq!(state.stats[5], 1024);
+        assert_eq!(state.stats[STAT_MONSTERS], 1);
+        assert_eq!(state.stats[STAT_SECRETS], 1);
     }
 
     #[test]
