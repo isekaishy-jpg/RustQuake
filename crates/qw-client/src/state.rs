@@ -81,6 +81,8 @@ pub struct ClientState {
     pub stop_sounds: Vec<StopSoundEvent>,
     pub muzzle_flashes: Vec<u16>,
     pub damage_events: Vec<DamageEvent>,
+    pub prints: Vec<(u8, String)>,
+    pub center_prints: Vec<String>,
     pub next_sound: Option<u8>,
     pub next_model: Option<u8>,
     pub view_entity: Option<u16>,
@@ -123,6 +125,8 @@ impl ClientState {
             stop_sounds: Vec::new(),
             muzzle_flashes: Vec::new(),
             damage_events: Vec::new(),
+            prints: Vec::new(),
+            center_prints: Vec::new(),
             next_sound: None,
             next_model: None,
             view_entity: None,
@@ -164,6 +168,8 @@ impl ClientState {
                 self.stop_sounds.clear();
                 self.muzzle_flashes.clear();
                 self.damage_events.clear();
+                self.prints.clear();
+                self.center_prints.clear();
                 self.static_entities.clear();
                 self.static_sounds.clear();
                 self.intermission = None;
@@ -413,6 +419,12 @@ impl ClientState {
                     origin: *origin,
                 });
             }
+            SvcMessage::Print { level, message } => {
+                self.prints.push((*level, message.clone()));
+            }
+            SvcMessage::CenterPrint(text) => {
+                self.center_prints.push(text.clone());
+            }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
                 if index < self.baselines.len() {
@@ -436,6 +448,8 @@ impl ClientState {
         self.stop_sounds.clear();
         self.muzzle_flashes.clear();
         self.damage_events.clear();
+        self.prints.clear();
+        self.center_prints.clear();
     }
 
     pub fn store_outgoing_cmd(&mut self, sequence: u32, cmd: UserCmd) {
@@ -1100,6 +1114,22 @@ mod tests {
     }
 
     #[test]
+    fn queues_print_messages() {
+        let mut state = ClientState::new();
+        state.apply_message(
+            &SvcMessage::Print {
+                level: 1,
+                message: "hello".to_string(),
+            },
+            0,
+        );
+        state.apply_message(&SvcMessage::CenterPrint("center".to_string()), 0);
+
+        assert_eq!(state.prints, vec![(1, "hello".to_string())]);
+        assert_eq!(state.center_prints, vec!["center".to_string()]);
+    }
+
+    #[test]
     fn clears_frame_events() {
         let mut state = ClientState::new();
         state.particle_effects.push(qw_common::ParticleEffect {
@@ -1135,6 +1165,8 @@ mod tests {
             blood: 2,
             origin: Vec3::new(4.0, 5.0, 6.0),
         });
+        state.prints.push((1, "test".to_string()));
+        state.center_prints.push("center".to_string());
 
         state.clear_frame_events();
 
@@ -1145,6 +1177,8 @@ mod tests {
         assert!(state.stop_sounds.is_empty());
         assert!(state.muzzle_flashes.is_empty());
         assert!(state.damage_events.is_empty());
+        assert!(state.prints.is_empty());
+        assert!(state.center_prints.is_empty());
     }
 
     #[test]
