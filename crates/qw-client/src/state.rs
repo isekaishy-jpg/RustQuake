@@ -54,6 +54,19 @@ pub struct StaticSound {
     pub attenuation: u8,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StopSoundEvent {
+    pub entity: u16,
+    pub channel: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DamageEvent {
+    pub armor: u8,
+    pub blood: u8,
+    pub origin: Vec3,
+}
+
 #[derive(Debug)]
 pub struct ClientState {
     pub serverinfo: InfoString,
@@ -61,6 +74,10 @@ pub struct ClientState {
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
+    pub sound_events: Vec<qw_common::SoundMessage>,
+    pub stop_sounds: Vec<StopSoundEvent>,
+    pub muzzle_flashes: Vec<u16>,
+    pub damage_events: Vec<DamageEvent>,
     pub next_sound: Option<u8>,
     pub next_model: Option<u8>,
     pub view_entity: Option<u16>,
@@ -98,6 +115,10 @@ impl ClientState {
             players,
             sounds: Vec::new(),
             models: Vec::new(),
+            sound_events: Vec::new(),
+            stop_sounds: Vec::new(),
+            muzzle_flashes: Vec::new(),
+            damage_events: Vec::new(),
             next_sound: None,
             next_model: None,
             view_entity: None,
@@ -134,6 +155,10 @@ impl ClientState {
                 self.particle_effects.clear();
                 self.temp_entities.clear();
                 self.nails.clear();
+                self.sound_events.clear();
+                self.stop_sounds.clear();
+                self.muzzle_flashes.clear();
+                self.damage_events.clear();
                 self.static_entities.clear();
                 self.static_sounds.clear();
                 self.intermission = None;
@@ -346,6 +371,29 @@ impl ClientState {
             }
             SvcMessage::Nails { projectiles } => {
                 self.nails = projectiles.clone();
+            }
+            SvcMessage::Sound(sound) => {
+                self.sound_events.push(sound.clone());
+            }
+            SvcMessage::StopSound { entity, channel } => {
+                self.stop_sounds.push(StopSoundEvent {
+                    entity: *entity,
+                    channel: *channel,
+                });
+            }
+            SvcMessage::MuzzleFlash { entity } => {
+                self.muzzle_flashes.push(*entity);
+            }
+            SvcMessage::Damage {
+                armor,
+                blood,
+                origin,
+            } => {
+                self.damage_events.push(DamageEvent {
+                    armor: *armor,
+                    blood: *blood,
+                    origin: *origin,
+                });
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -937,6 +985,54 @@ mod tests {
 
         assert_eq!(state.temp_entities, vec![temp]);
         assert_eq!(state.particle_effects, vec![particle]);
+    }
+
+    #[test]
+    fn queues_sound_and_damage_events() {
+        let mut state = ClientState::new();
+        let sound = qw_common::SoundMessage {
+            entity: 4,
+            channel: 2,
+            sound_num: 7,
+            volume: 200,
+            attenuation: 0.8,
+            origin: Vec3::new(1.0, 2.0, 3.0),
+        };
+        state.apply_message(&SvcMessage::Sound(sound.clone()), 0);
+        state.apply_message(
+            &SvcMessage::StopSound {
+                entity: 5,
+                channel: 1,
+            },
+            0,
+        );
+        state.apply_message(&SvcMessage::MuzzleFlash { entity: 9 }, 0);
+        state.apply_message(
+            &SvcMessage::Damage {
+                armor: 3,
+                blood: 5,
+                origin: Vec3::new(4.0, 5.0, 6.0),
+            },
+            0,
+        );
+
+        assert_eq!(state.sound_events, vec![sound]);
+        assert_eq!(
+            state.stop_sounds,
+            vec![StopSoundEvent {
+                entity: 5,
+                channel: 1
+            }]
+        );
+        assert_eq!(state.muzzle_flashes, vec![9]);
+        assert_eq!(
+            state.damage_events,
+            vec![DamageEvent {
+                armor: 3,
+                blood: 5,
+                origin: Vec3::new(4.0, 5.0, 6.0),
+            }]
+        );
     }
 
     #[test]
