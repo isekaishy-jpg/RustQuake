@@ -104,6 +104,7 @@ pub struct ClientState {
     pub show_sellscreen: bool,
     pub kick_angle: f32,
     pub paused: bool,
+    pub disconnected: bool,
 }
 
 impl ClientState {
@@ -148,6 +149,7 @@ impl ClientState {
             show_sellscreen: false,
             kick_angle: 0.0,
             paused: false,
+            disconnected: false,
         }
     }
 
@@ -176,6 +178,10 @@ impl ClientState {
                 self.finale = None;
                 self.show_sellscreen = false;
                 self.kick_angle = 0.0;
+                self.disconnected = false;
+            }
+            SvcMessage::Disconnect => {
+                self.disconnected = true;
             }
             SvcMessage::Time(value) => {
                 self.server_time = *value;
@@ -1010,6 +1016,13 @@ mod tests {
         assert_eq!(state.signon_num, Some(2));
         assert_eq!(state.server_time, 12.5);
         assert!(state.paused);
+    }
+
+    #[test]
+    fn applies_disconnect() {
+        let mut state = ClientState::new();
+        state.apply_message(&SvcMessage::Disconnect, 0);
+        assert!(state.disconnected);
     }
 
     #[test]
