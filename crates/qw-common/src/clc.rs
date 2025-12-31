@@ -13,6 +13,15 @@ pub struct MoveMessage {
     pub delta_sequence: Option<u8>,
 }
 
+pub fn write_string_cmd(buf: &mut SizeBuf, text: &str) -> Result<(), SizeBufError> {
+    buf.write_u8(Clc::StringCmd as u8)?;
+    buf.write_string(Some(text))
+}
+
+pub fn write_nop(buf: &mut SizeBuf) -> Result<(), SizeBufError> {
+    buf.write_u8(Clc::Nop as u8)
+}
+
 pub fn write_move_message(buf: &mut SizeBuf, message: &MoveMessage) -> Result<(), SizeBufError> {
     buf.write_u8(Clc::Move as u8)?;
     let checksum_index = buf.len();
@@ -144,6 +153,17 @@ mod tests {
         let mut reader = MsgReader::new(buf.as_slice());
         let (_, _, _, delta) = read_move_message(&mut reader).unwrap();
         assert_eq!(delta, None);
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn writes_string_cmd() {
+        let mut buf = SizeBuf::new(64);
+        write_string_cmd(&mut buf, "prespawn").unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(reader.read_string().unwrap(), "prespawn");
         assert_eq!(reader.remaining(), 0);
     }
 }

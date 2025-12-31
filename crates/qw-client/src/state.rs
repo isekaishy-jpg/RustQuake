@@ -1,7 +1,7 @@
 use qw_common::{
     EntityState, Frame, InfoString, MAX_CLIENTS, MAX_EDICTS, MAX_INFO_STRING,
     MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities, PacketEntitiesUpdate, SvcMessage,
-    UPDATE_BACKUP, UPDATE_MASK, Vec3,
+    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -124,6 +124,21 @@ impl ClientState {
             }
             _ => {}
         }
+    }
+
+    pub fn store_outgoing_cmd(&mut self, sequence: u32, cmd: UserCmd) {
+        let index = (sequence as usize) & UPDATE_MASK;
+        self.frames[index].cmd = cmd;
+    }
+
+    pub fn outgoing_cmd(&self, sequence: u32) -> UserCmd {
+        let index = (sequence as usize) & UPDATE_MASK;
+        self.frames[index].cmd
+    }
+
+    pub fn set_outgoing_delta_sequence(&mut self, sequence: u32, delta_sequence: i32) {
+        let index = (sequence as usize) & UPDATE_MASK;
+        self.frames[index].delta_sequence = delta_sequence;
     }
 
     fn apply_packet_entities(&mut self, update: &PacketEntitiesUpdate, incoming_sequence: u32) {

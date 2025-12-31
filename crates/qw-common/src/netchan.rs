@@ -148,6 +148,10 @@ impl Netchan {
     pub fn incoming_sequence(&self) -> u32 {
         self.incoming_sequence
     }
+
+    pub fn outgoing_sequence(&self) -> u32 {
+        self.outgoing_sequence
+    }
 }
 
 impl NetchanHeader {
