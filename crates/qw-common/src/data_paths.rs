@@ -26,13 +26,11 @@ pub fn locate_data_dir() -> Result<PathBuf, DataPathError> {
 
     let cwd = env::current_dir()?;
     let config_path = cwd.join("config").join("data_paths.toml");
-    if !config_path.exists() {
-        return Err(DataPathError::NotFound);
-    }
-
-    let contents = fs::read_to_string(&config_path)?;
-    if let Some(dir) = parse_quake_dir(&contents) {
-        return Ok(PathBuf::from(dir));
+    if config_path.exists() {
+        let contents = fs::read_to_string(&config_path)?;
+        if let Some(dir) = parse_quake_dir(&contents) {
+            return Ok(PathBuf::from(dir));
+        }
     }
 
     if let Some(dir) = find_default_quake_dir() {
@@ -106,7 +104,10 @@ fn default_quake_paths() -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_quake_dir;
+    use super::{locate_data_dir, parse_quake_dir};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parses_quake_dir_value() {
@@ -124,5 +125,30 @@ mod tests {
     fn ignores_missing_quake_dir() {
         let input = "other = \"value\"";
         assert!(parse_quake_dir(input).is_none());
+    }
+
+    #[test]
+    fn locate_data_dir_uses_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        let base = std::env::temp_dir().join("rustquake-data-path-test");
+        let config_dir = base.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        let data_dir = base.join("quake");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let config_path = config_dir.join("data_paths.toml");
+        let contents = format!(
+            "quake_dir = \"{}\"",
+            data_dir.to_string_lossy().replace('\\', "/")
+        );
+        std::fs::write(&config_path, contents).unwrap();
+
+        std::env::set_current_dir(&base).unwrap();
+        let found = locate_data_dir().unwrap();
+        assert_eq!(found, data_dir);
+
+        std::env::set_current_dir(&original_dir).unwrap();
+        std::fs::remove_dir_all(base).ok();
     }
 }
