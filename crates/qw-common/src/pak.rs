@@ -113,6 +113,19 @@ mod tests {
 
         fs::remove_dir_all(dir).ok();
     }
+
+    #[test]
+    fn finds_entries_case_insensitively() {
+        let dir = temp_dir();
+        let pak_path = dir.join("pak0.pak");
+        write_pak(pak_path.as_path(), &[("SOUND/TEST.WAV", b"data")]).unwrap();
+
+        let pak = Pak::open(pak_path).unwrap();
+        let entry = pak.find_case_insensitive("sound/test.wav");
+        assert!(entry.is_some());
+
+        fs::remove_dir_all(dir).ok();
+    }
 }
 
 impl Pak {
@@ -173,6 +186,12 @@ impl Pak {
 
     pub fn find(&self, name: &str) -> Option<&PakEntry> {
         self.entries.iter().find(|entry| entry.name == name)
+    }
+
+    pub fn find_case_insensitive(&self, name: &str) -> Option<&PakEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
     }
 
     pub fn read(&self, entry: &PakEntry) -> Result<Vec<u8>, PakError> {

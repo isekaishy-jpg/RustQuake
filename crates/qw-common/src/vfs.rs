@@ -80,12 +80,14 @@ impl QuakeFs {
         for search in &self.search_paths {
             match search {
                 SearchPath::Pack(pack) => {
-                    if pack.find(name).is_some() {
+                    if pack.find(name).is_some() || pack.find_case_insensitive(name).is_some() {
                         return true;
                     }
                 }
                 SearchPath::Dir(dir) => {
-                    if dir.join(name).is_file() {
+                    if dir.join(name).is_file()
+                        || resolve_case_insensitive(dir, name).is_some_and(|path| path.is_file())
+                    {
                         return true;
                     }
                 }
@@ -106,10 +108,18 @@ impl QuakeFs {
                     if let Some(entry) = pack.find(name) {
                         return Ok(pack.read(entry)?);
                     }
+                    if let Some(entry) = pack.find_case_insensitive(name) {
+                        return Ok(pack.read(entry)?);
+                    }
                 }
                 SearchPath::Dir(dir) => {
                     let path = dir.join(name);
                     if path.is_file() {
+                        return Ok(fs::read(path)?);
+                    }
+                    if let Some(path) = resolve_case_insensitive(dir, name)
+                        && path.is_file()
+                    {
                         return Ok(fs::read(path)?);
                     }
                 }
@@ -118,6 +128,30 @@ impl QuakeFs {
 
         Err(FsError::NotFound)
     }
+}
+
+fn resolve_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut path = dir.to_path_buf();
+    for component in Path::new(name).components() {
+        let Component::Normal(target) = component else {
+            continue;
+        };
+        let target = target.to_string_lossy();
+        let entries = fs::read_dir(&path).ok()?;
+        let mut found = None;
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            if file_name
+                .to_string_lossy()
+                .eq_ignore_ascii_case(target.as_ref())
+            {
+                found = Some(entry.path());
+                break;
+            }
+        }
+        path = found?;
+    }
+    Some(path)
 }
 
 fn is_safe_relative_path(name: &str) -> bool {
@@ -216,5 +250,22 @@ mod tests {
         let fsys = QuakeFs::new();
         assert!(!fsys.contains("../id1/pak0.pak"));
         assert!(!fsys.contains("C:\\id1\\pak0.pak"));
+    }
+
+    #[test]
+    fn reads_case_insensitive_from_directory() {
+        let dir = temp_dir();
+        let sound_dir = dir.join("Sound");
+        fs::create_dir_all(&sound_dir).unwrap();
+        fs::write(sound_dir.join("Test.WAV"), b"data").unwrap();
+
+        let mut fsys = QuakeFs::new();
+        fsys.add_game_dir(&dir).unwrap();
+
+        assert!(fsys.contains("sound/test.wav"));
+        let data = fsys.read("sound/test.wav").unwrap();
+        assert_eq!(data, b"data");
+
+        fs::remove_dir_all(dir).ok();
     }
 }
