@@ -163,6 +163,10 @@ impl ClientState {
                 self.models.clear();
                 self.client_data = None;
                 self.server_version = None;
+                self.view_entity = None;
+                self.view_angles = Vec3::default();
+                self.server_time = 0.0;
+                self.paused = false;
                 self.next_sound = None;
                 self.next_model = None;
                 self.signon_num = None;
@@ -964,6 +968,10 @@ mod tests {
     #[test]
     fn applies_serverdata_and_lists() {
         let mut state = ClientState::new();
+        state.view_entity = Some(9);
+        state.view_angles = Vec3::new(1.0, 2.0, 3.0);
+        state.server_time = 7.0;
+        state.paused = true;
         let data = qw_common::ServerData {
             protocol: qw_common::PROTOCOL_VERSION,
             server_count: 9,
@@ -986,6 +994,10 @@ mod tests {
         };
         state.apply_message(&SvcMessage::ServerData(data.clone()), 0);
         assert_eq!(state.serverdata, Some(data));
+        assert_eq!(state.view_entity, None);
+        assert_eq!(state.view_angles, Vec3::default());
+        assert_eq!(state.server_time, 0.0);
+        assert!(!state.paused);
 
         let sound_chunk = qw_common::StringListChunk {
             start: 0,
