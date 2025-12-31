@@ -1,4 +1,6 @@
-use std::io;
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{self, Write};
 
 use crate::client::{Client, ClientPacket};
 use crate::net::NetClient;
@@ -73,6 +75,9 @@ pub struct ClientRunner {
     pub state: ClientState,
     fs_game_dir: Option<String>,
     data_dir: Option<PathBuf>,
+    download_queue: VecDeque<String>,
+    download: Option<DownloadState>,
+    signon_phase: SignonPhase,
 }
 
 impl ClientRunner {
@@ -85,6 +90,9 @@ impl ClientRunner {
             state: ClientState::new(),
             fs_game_dir: None,
             data_dir: None,
+            download_queue: VecDeque::new(),
+            download: None,
+            signon_phase: SignonPhase::Idle,
         }
     }
 
@@ -186,18 +194,27 @@ impl ClientRunner {
         match message {
             SvcMessage::ServerData(data) => {
                 let cmd = format!("soundlist {} 0", data.server_count);
+                self.signon_phase = SignonPhase::SoundList;
                 self.send_string_cmd(&cmd)?;
             }
             SvcMessage::SoundList(chunk) => {
-                let Some(data) = &self.state.serverdata else {
+                let Some(data) = self.state.serverdata.clone() else {
                     return Ok(());
                 };
                 if chunk.next != 0 {
                     let cmd = format!("soundlist {} {}", data.server_count, chunk.next);
                     self.send_string_cmd(&cmd)?;
                 } else {
-                    let cmd = format!("modellist {} 0", data.server_count);
-                    self.send_string_cmd(&cmd)?;
+                    self.ensure_filesystem(&data)?;
+                    self.download_queue.clear();
+                    self.queue_missing_sounds()?;
+                    if self.start_next_download()? {
+                        self.signon_phase = SignonPhase::ModelList;
+                    } else {
+                        let cmd = format!("modellist {} 0", data.server_count);
+                        self.signon_phase = SignonPhase::ModelList;
+                        self.send_string_cmd(&cmd)?;
+                    }
                 }
             }
             SvcMessage::ModelList(chunk) => {
@@ -208,13 +225,24 @@ impl ClientRunner {
                     let cmd = format!("modellist {} {}", data.server_count, chunk.next);
                     self.send_string_cmd(&cmd)?;
                 } else {
-                    let checksum2 = self.map_checksum2(&data)?;
-                    let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
-                    self.send_string_cmd(&cmd)?;
+                    self.ensure_filesystem(&data)?;
+                    self.download_queue.clear();
+                    self.queue_missing_models()?;
+                    if self.start_next_download()? {
+                        self.signon_phase = SignonPhase::Prespawn;
+                    } else {
+                        let checksum2 = self.map_checksum2(&data)?;
+                        let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
+                        self.signon_phase = SignonPhase::Done;
+                        self.send_string_cmd(&cmd)?;
+                    }
                 }
             }
             SvcMessage::StuffText(text) => {
                 self.handle_stufftext(text)?;
+            }
+            SvcMessage::Download { size, percent, data } => {
+                self.handle_download(*size, *percent, data)?;
             }
             _ => {}
         }
@@ -278,10 +306,165 @@ impl ClientRunner {
             fs.add_game_dir(&mod_dir)?;
         }
 
+        let download_dir = self.download_root()?.join(&data.game_dir);
+        fs::create_dir_all(&download_dir)?;
+        fs.add_game_dir(&download_dir)?;
+
         self.client.fs = fs;
         self.fs_game_dir = Some(data.game_dir.clone());
         Ok(())
     }
+
+    fn queue_missing_sounds(&mut self) -> Result<(), RunnerError> {
+        for name in &self.state.sounds {
+            if name.is_empty() {
+                continue;
+            }
+            let path = format!("sound/{}", name);
+            if !self.client.fs.contains(&path) {
+                self.download_queue.push_back(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn queue_missing_models(&mut self) -> Result<(), RunnerError> {
+        for name in &self.state.models {
+            if name.is_empty() || name.starts_with('*') {
+                continue;
+            }
+            if !self.client.fs.contains(name) {
+                self.download_queue.push_back(name.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn start_next_download(&mut self) -> Result<bool, RunnerError> {
+        if self.download.is_some() {
+            return Ok(true);
+        }
+
+        let Some(name) = self.download_queue.pop_front() else {
+            return Ok(false);
+        };
+        let Some(data) = &self.state.serverdata else {
+            return Ok(false);
+        };
+
+        let download_root = self.download_root()?;
+        let final_path = download_root.join(&data.game_dir).join(&name);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let filename = final_path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "download.tmp".to_string());
+        let temp_path = final_path.with_file_name(format!("{}.tmp", filename));
+
+        let file = File::create(&temp_path)?;
+        self.download = Some(DownloadState {
+            temp_path,
+            final_path,
+            file,
+        });
+
+        let cmd = format!("download {}", name);
+        self.send_string_cmd(&cmd)?;
+        Ok(true)
+    }
+
+    fn handle_download(
+        &mut self,
+        size: i16,
+        percent: u8,
+        data: &[u8],
+    ) -> Result<(), RunnerError> {
+        let Some(state) = &mut self.download else {
+            return Ok(());
+        };
+
+        if size == -1 {
+            let temp_path = state.temp_path.clone();
+            self.download = None;
+            let _ = fs::remove_file(temp_path);
+            if self.start_next_download()? {
+                return Ok(());
+            }
+            self.resume_signon()?;
+            return Ok(());
+        }
+
+        if size > 0 {
+            state.file.write_all(data)?;
+        }
+
+        if percent != 100 {
+            self.send_string_cmd("nextdl")?;
+            return Ok(());
+        }
+
+        state.file.flush()?;
+        let temp_path = state.temp_path.clone();
+        let final_path = state.final_path.clone();
+        self.download = None;
+        let _ = fs::rename(&temp_path, &final_path);
+
+        if self.start_next_download()? {
+            return Ok(());
+        }
+        self.resume_signon()?;
+        Ok(())
+    }
+
+    fn resume_signon(&mut self) -> Result<(), RunnerError> {
+        let Some(data) = self.state.serverdata.clone() else {
+            return Ok(());
+        };
+        match self.signon_phase {
+            SignonPhase::ModelList => {
+                let cmd = format!("modellist {} 0", data.server_count);
+                self.send_string_cmd(&cmd)?;
+            }
+            SignonPhase::Prespawn => {
+                let checksum2 = self.map_checksum2(&data)?;
+                let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
+                self.signon_phase = SignonPhase::Done;
+                self.send_string_cmd(&cmd)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn download_root(&self) -> Result<PathBuf, RunnerError> {
+        if let Ok(value) = std::env::var("RUSTQUAKE_DOWNLOAD_DIR") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(PathBuf::from(trimmed));
+            }
+        }
+        let mut path = std::env::current_dir()?;
+        path.push("data");
+        path.push("downloads");
+        Ok(path)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum SignonPhase {
+    Idle,
+    SoundList,
+    ModelList,
+    Prespawn,
+    Done,
+}
+
+struct DownloadState {
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    file: File,
 }
 
 fn map_path(level_name: &str) -> String {
@@ -308,7 +491,10 @@ mod tests {
         S2C_CONNECTION, ServerData, SizeBuf, SvcMessage, UserCmd, Vec3,
     };
     use std::net::UdpSocket;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn handshake_round_trip() {
@@ -737,5 +923,95 @@ mod tests {
         }
 
         data
+    }
+
+    #[test]
+    fn requests_download_for_missing_sound() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let download_dir = temp_dir();
+        let old_download = std::env::var("RUSTQUAKE_DOWNLOAD_DIR").ok();
+        // Safety: env var mutation is process-global; guard with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", &download_dir);
+        }
+
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        runner.client.fs.add_game_dir(&dir).unwrap();
+
+        runner.state.serverdata = Some(ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 9,
+            game_dir: "id1".to_string(),
+            player_num: 1,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        });
+
+        let mut buf = SizeBuf::new(256);
+        qw_common::write_svc_message(
+            &mut buf,
+            &SvcMessage::SoundList(qw_common::StringListChunk {
+                start: 0,
+                items: vec!["misc/foo.wav".to_string()],
+                next: 0,
+            }),
+        )
+        .unwrap();
+        let mut server_chan = Netchan::new(27001);
+        let packet = server_chan.build_packet(buf.as_slice(), false).unwrap();
+
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 512];
+        for _ in 0..10 {
+            if runner.poll_once(&mut client_buf).unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut recv_chan = Netchan::new(27001);
+        let payload = recv_payload(&server, &mut recv_chan);
+        let mut reader = MsgReader::new(&payload);
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(reader.read_string().unwrap(), "download sound/misc/foo.wav");
+
+        if let Some(value) = old_download {
+            unsafe {
+                std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("RUSTQUAKE_DOWNLOAD_DIR");
+            }
+        }
+        std::fs::remove_dir_all(download_dir).ok();
+        std::fs::remove_dir_all(dir).ok();
     }
 }
