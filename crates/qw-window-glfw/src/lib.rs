@@ -65,6 +65,10 @@ impl GlfwWindow {
         std::mem::take(&mut self.pending_events)
     }
 
+    pub fn push_event(&mut self, event: WindowEvent) {
+        self.pending_events.push(event);
+    }
+
     pub fn should_close(&self) -> bool {
         !self.open
     }
@@ -103,5 +107,14 @@ mod tests {
         let mut window = GlfwWindow::new(WindowConfig::default());
         window.set_title("Unit");
         assert_eq!(window.config().title, "Unit");
+    }
+
+    #[test]
+    fn collects_pending_events() {
+        let mut window = GlfwWindow::new(WindowConfig::default());
+        window.push_event(WindowEvent::CloseRequested);
+        let events = window.poll_events();
+        assert_eq!(events, vec![WindowEvent::CloseRequested]);
+        assert!(window.poll_events().is_empty());
     }
 }
