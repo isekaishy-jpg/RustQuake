@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod config;
 mod handshake;
+mod input;
 mod net;
 mod prediction;
 mod runner;
@@ -117,7 +118,7 @@ fn run() -> Result<(), AppError> {
     });
     loop {
         for event in window.poll_events() {
-            if handle_window_event(&mut window, &mut renderer, event) {
+            if handle_window_event(&mut window, &mut renderer, event, &mut pending_cmds) {
                 return Ok(());
             }
         }
@@ -293,6 +294,7 @@ fn handle_window_event(
     window: &mut GlfwWindow,
     renderer: &mut GlRenderer,
     event: WindowEvent,
+    pending_cmds: &mut VecDeque<String>,
 ) -> bool {
     match event {
         WindowEvent::CloseRequested => {
@@ -304,6 +306,9 @@ fn handle_window_event(
             false
         }
         WindowEvent::Key { key, action } => {
+            if let Some(cmd) = crate::input::map_key_action(key, action) {
+                pending_cmds.push_back(cmd);
+            }
             if key == Key::Escape && action == Action::Press {
                 window.close();
                 true
@@ -351,7 +356,13 @@ mod tests {
     fn window_close_event_triggers_exit() {
         let mut window = GlfwWindow::new(WindowConfig::default());
         let mut renderer = GlRenderer::new(RendererConfig::default());
-        let exit = handle_window_event(&mut window, &mut renderer, WindowEvent::CloseRequested);
+        let mut pending = VecDeque::new();
+        let exit = handle_window_event(
+            &mut window,
+            &mut renderer,
+            WindowEvent::CloseRequested,
+            &mut pending,
+        );
         assert!(exit);
         assert!(window.should_close());
     }
