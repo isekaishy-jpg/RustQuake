@@ -1,6 +1,6 @@
 use qw_common::{
-    EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS, MAX_INFO_STRING,
-    MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities,
+    EntityState, Frame, InfoString, NailProjectile, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS,
+    MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities,
     PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_MONSTERS, STAT_SECRETS,
     UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
@@ -74,6 +74,7 @@ pub struct ClientState {
     pub signon_num: Option<u8>,
     pub particle_effects: Vec<qw_common::ParticleEffect>,
     pub temp_entities: Vec<qw_common::TempEntityMessage>,
+    pub nails: Vec<NailProjectile>,
     pub static_entities: Vec<EntityState>,
     pub static_sounds: Vec<StaticSound>,
     pub intermission: Option<(Vec3, Vec3)>,
@@ -110,6 +111,7 @@ impl ClientState {
             signon_num: None,
             particle_effects: Vec::new(),
             temp_entities: Vec::new(),
+            nails: Vec::new(),
             static_entities: Vec::new(),
             static_sounds: Vec::new(),
             intermission: None,
@@ -131,6 +133,7 @@ impl ClientState {
                 self.signon_num = None;
                 self.particle_effects.clear();
                 self.temp_entities.clear();
+                self.nails.clear();
                 self.static_entities.clear();
                 self.static_sounds.clear();
                 self.intermission = None;
@@ -340,6 +343,9 @@ impl ClientState {
             }
             SvcMessage::TempEntity(temp) => {
                 self.temp_entities.push(temp.clone());
+            }
+            SvcMessage::Nails { projectiles } => {
+                self.nails = projectiles.clone();
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -931,6 +937,23 @@ mod tests {
 
         assert_eq!(state.temp_entities, vec![temp]);
         assert_eq!(state.particle_effects, vec![particle]);
+    }
+
+    #[test]
+    fn stores_nail_projectiles() {
+        let mut state = ClientState::new();
+        let projectile = qw_common::NailProjectile {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            angles: Vec3::new(45.0, 90.0, 0.0),
+        };
+        state.apply_message(
+            &SvcMessage::Nails {
+                projectiles: vec![projectile.clone()],
+            },
+            0,
+        );
+
+        assert_eq!(state.nails, vec![projectile]);
     }
 
     #[test]

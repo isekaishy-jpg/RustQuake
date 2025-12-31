@@ -62,7 +62,7 @@ pub enum SvcMessage {
         percent: u8,
         data: Vec<u8>,
     },
-    Nails { count: u8 },
+    Nails { projectiles: Vec<NailProjectile> },
     ChokeCount(u8),
     UpdateFrags { slot: u8, frags: i16 },
     UpdatePing { slot: u8, ping: i16 },
@@ -131,6 +131,12 @@ pub struct TempEntityMessage {
     pub end: Option<Vec3>,
     pub count: Option<u8>,
     pub entity: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NailProjectile {
+    pub origin: Vec3,
+    pub angles: Vec3,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,6 +330,58 @@ fn parse_sound(reader: &mut MsgReader) -> Result<SoundMessage, MsgReadError> {
         attenuation,
         origin,
     })
+}
+
+fn decode_nail_projectile(bits: [u8; 6]) -> NailProjectile {
+    let packed_x = (bits[0] as i32) + (((bits[1] & 0x0f) as i32) << 8);
+    let packed_y = ((bits[1] >> 4) as i32) + ((bits[2] as i32) << 4);
+    let packed_z = (bits[3] as i32) + (((bits[4] & 0x0f) as i32) << 8);
+
+    let origin = Vec3::new(
+        ((packed_x << 1) - 4096) as f32,
+        ((packed_y << 1) - 4096) as f32,
+        ((packed_z << 1) - 4096) as f32,
+    );
+    let pitch = 360.0 * (bits[4] >> 4) as f32 / 16.0;
+    let yaw = 360.0 * (bits[5] as f32) / 256.0;
+
+    NailProjectile {
+        origin,
+        angles: Vec3::new(pitch, yaw, 0.0),
+    }
+}
+
+fn quantize_nail_coord(value: f32) -> i32 {
+    let scaled = ((value + 4096.0) / 2.0).round() as i32;
+    scaled.clamp(0, 4095)
+}
+
+fn quantize_nail_angle(value: f32, steps: i32) -> u8 {
+    let normalized = value.rem_euclid(360.0);
+    let scaled = (normalized / 360.0) * steps as f32;
+    let index = scaled.round() as i32;
+    index.clamp(0, steps - 1) as u8
+}
+
+fn encode_nail_projectile(projectile: &NailProjectile) -> [u8; 6] {
+    let packed_x = quantize_nail_coord(projectile.origin.x);
+    let packed_y = quantize_nail_coord(projectile.origin.y);
+    let packed_z = quantize_nail_coord(projectile.origin.z);
+
+    let pitch = quantize_nail_angle(projectile.angles.x, 16);
+    let yaw = quantize_nail_angle(projectile.angles.y, 256);
+
+    let b0 = (packed_x & 0xff) as u8;
+    let b1_low = ((packed_x >> 8) & 0x0f) as u8;
+    let b1_high = (packed_y & 0x0f) as u8;
+    let b1 = (b1_high << 4) | b1_low;
+    let b2 = ((packed_y >> 4) & 0xff) as u8;
+    let b3 = (packed_z & 0xff) as u8;
+    let b4_low = ((packed_z >> 8) & 0x0f) as u8;
+    let b4 = (pitch << 4) | b4_low;
+    let b5 = yaw;
+
+    [b0, b1, b2, b3, b4, b5]
 }
 
 fn parse_entity_delta(reader: &mut MsgReader, word: u16) -> Result<EntityDelta, MsgReadError> {
@@ -741,11 +799,15 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
         }
         Svc::Nails => {
             let count = reader.read_u8()?;
-            if count > 0 {
-                let bytes = count as usize * 6;
-                reader.skip(bytes)?;
+            let mut projectiles = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let mut bits = [0u8; 6];
+                for idx in 0..6 {
+                    bits[idx] = reader.read_u8()?;
+                }
+                projectiles.push(decode_nail_projectile(bits));
             }
-            Ok(SvcMessage::Nails { count })
+            Ok(SvcMessage::Nails { projectiles })
         }
         Svc::ChokeCount => {
             let count = reader.read_u8()?;
@@ -1117,12 +1179,15 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
                 buf.write_bytes(&data[..count])?;
             }
         }
-        SvcMessage::Nails { count } => {
+        SvcMessage::Nails { projectiles } => {
             buf.write_u8(Svc::Nails as u8)?;
-            buf.write_u8(*count)?;
-            let bytes = (*count as usize) * 6;
-            if bytes > 0 {
-                buf.write_bytes(&vec![0u8; bytes])?;
+            let count = projectiles.len().min(u8::MAX as usize) as u8;
+            buf.write_u8(count)?;
+            for projectile in projectiles.iter().take(count as usize) {
+                let bits = encode_nail_projectile(projectile);
+                for byte in bits {
+                    buf.write_u8(byte)?;
+                }
             }
         }
         SvcMessage::ChokeCount(count) => {
@@ -1431,6 +1496,35 @@ mod tests {
         let mut reader = MsgReader::new(buf.as_slice());
         let msg = parse_svc_message(&mut reader).unwrap();
         assert_eq!(msg, chunk);
+    }
+
+    #[test]
+    fn parses_nail_projectiles() {
+        let projectiles = vec![NailProjectile {
+            origin: Vec3::new(0.0, 0.0, 0.0),
+            angles: Vec3::new(90.0, 90.0, 0.0),
+        }];
+        let message = SvcMessage::Nails {
+            projectiles: projectiles.clone(),
+        };
+        let mut buf = SizeBuf::new(32);
+        write_svc_message(&mut buf, &message).unwrap();
+
+        let expected = [
+            Svc::Nails as u8,
+            1,
+            0x00,
+            0x08,
+            0x80,
+            0x00,
+            0x48,
+            0x40,
+        ];
+        assert_eq!(buf.as_slice(), &expected);
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, message);
     }
 
     #[test]
