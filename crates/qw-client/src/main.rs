@@ -99,12 +99,29 @@ fn run() -> Result<(), AppError> {
         }
     });
     loop {
-        if let Some(crate::client::ClientPacket::Messages(_)) = runner.poll_once(&mut buf)? {
-            for (level, message) in runner.state.prints.drain(..) {
-                println!("[{level}] {message}");
-            }
-            for message in runner.state.center_prints.drain(..) {
-                println!("[center] {message}");
+        if let Some(packet) = runner.poll_once(&mut buf)? {
+            match packet {
+                crate::client::ClientPacket::Messages(_) => {
+                    for (level, message) in runner.state.prints.drain(..) {
+                        println!("[{level}] {message}");
+                    }
+                    for message in runner.state.center_prints.drain(..) {
+                        println!("[center] {message}");
+                    }
+                }
+                crate::client::ClientPacket::OutOfBand(msg) => match msg {
+                    qw_common::OobMessage::Print(text) => {
+                        if !text.is_empty() {
+                            println!("[oob] {text}");
+                        }
+                    }
+                    qw_common::OobMessage::ClientCommand(text) => {
+                        if !text.is_empty() {
+                            println!("[oob-cmd] {text}");
+                        }
+                    }
+                    _ => {}
+                },
             }
         }
 
