@@ -160,6 +160,13 @@ pub enum RenderModelFrame<'a> {
     Sprite(&'a SpriteImage),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedEntity<'a> {
+    pub entity: &'a RenderEntity,
+    pub model: Option<&'a RenderModel>,
+    pub frame: Option<RenderModelFrame<'a>>,
+}
+
 impl RenderModel {
     pub fn frame_at_time(&self, frame: u32, time: f32) -> Option<RenderModelFrame<'_>> {
         match &self.kind {
@@ -375,6 +382,24 @@ impl GlRenderer {
 
     pub fn models(&self) -> &[Option<RenderModel>] {
         &self.models
+    }
+
+    pub fn resolved_entities(&self, time: f32) -> Vec<ResolvedEntity<'_>> {
+        self.entities
+            .iter()
+            .map(|entity| {
+                let model = self
+                    .models
+                    .get(entity.model_index)
+                    .and_then(|entry| entry.as_ref());
+                let frame = model.and_then(|model| model.frame_at_time(entity.frame, time));
+                ResolvedEntity {
+                    entity,
+                    model,
+                    frame,
+                }
+            })
+            .collect()
     }
 
     pub fn draw_list(&self) -> Option<RenderDrawList> {
@@ -801,6 +826,53 @@ mod tests {
         match frame {
             RenderModelFrame::Sprite(image) => {
                 assert_eq!(image.pixels[0], 2);
+            }
+            _ => panic!("expected sprite frame"),
+        }
+    }
+
+    #[test]
+    fn resolves_entity_frames_from_models() {
+        let sprite = Sprite {
+            header: SpriteHeader {
+                sprite_type: 0,
+                bounding_radius: 0.0,
+                width: 1,
+                height: 1,
+                num_frames: 1,
+                beam_length: 0.0,
+                sync_type: 0,
+            },
+            frames: vec![SpriteFrame::Single(SpriteImage {
+                width: 1,
+                height: 1,
+                origin: (0, 0),
+                pixels: vec![9],
+            })],
+        };
+        let model = RenderModel {
+            kind: RenderModelKind::Sprite(sprite),
+            textures: Vec::new(),
+        };
+
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        renderer.set_models(vec![Some(model)]);
+        renderer.set_entities(vec![RenderEntity {
+            kind: RenderEntityKind::Sprite,
+            model_index: 0,
+            origin: Vec3::default(),
+            angles: Vec3::default(),
+            frame: 0,
+            skin: 0,
+            alpha: 1.0,
+        }]);
+
+        let resolved = renderer.resolved_entities(0.0);
+        assert_eq!(resolved.len(), 1);
+        let frame = resolved[0].frame.unwrap();
+        match frame {
+            RenderModelFrame::Sprite(image) => {
+                assert_eq!(image.pixels[0], 9);
             }
             _ => panic!("expected sprite frame"),
         }
