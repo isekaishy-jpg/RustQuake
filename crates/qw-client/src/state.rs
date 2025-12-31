@@ -1,7 +1,7 @@
 use qw_common::{
     EntityState, Frame, InfoString, MAX_CLIENTS, MAX_EDICTS, MAX_INFO_STRING,
-    MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities, PacketEntitiesUpdate, SvcMessage,
-    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
+    MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities, PacketEntitiesUpdate, ServerData,
+    StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,12 @@ impl PlayerInfo {
 #[derive(Debug)]
 pub struct ClientState {
     pub serverinfo: InfoString,
+    pub serverdata: Option<ServerData>,
     pub players: Vec<PlayerInfo>,
+    pub sounds: Vec<String>,
+    pub models: Vec<String>,
+    pub next_sound: Option<u8>,
+    pub next_model: Option<u8>,
     pub baselines: Vec<EntityState>,
     pub frames: Vec<Frame>,
     pub valid_sequence: i32,
@@ -54,7 +59,12 @@ impl ClientState {
         let frames = vec![Frame::default(); UPDATE_BACKUP];
         Self {
             serverinfo: InfoString::new(MAX_SERVERINFO_STRING),
+            serverdata: None,
             players,
+            sounds: Vec::new(),
+            models: Vec::new(),
+            next_sound: None,
+            next_model: None,
             baselines,
             frames,
             valid_sequence: 0,
@@ -63,6 +73,13 @@ impl ClientState {
 
     pub fn apply_message(&mut self, msg: &SvcMessage, incoming_sequence: u32) {
         match msg {
+            SvcMessage::ServerData(data) => {
+                self.serverdata = Some(data.clone());
+                self.sounds.clear();
+                self.models.clear();
+                self.next_sound = None;
+                self.next_model = None;
+            }
             SvcMessage::UpdateUserInfo {
                 slot,
                 user_id,
@@ -110,6 +127,14 @@ impl ClientState {
                         player.model_index = model_index;
                     }
                 }
+            }
+            SvcMessage::SoundList(chunk) => {
+                apply_string_list(&mut self.sounds, chunk);
+                self.next_sound = if chunk.next == 0 { None } else { Some(chunk.next) };
+            }
+            SvcMessage::ModelList(chunk) => {
+                apply_string_list(&mut self.models, chunk);
+                self.next_model = if chunk.next == 0 { None } else { Some(chunk.next) };
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -244,6 +269,21 @@ impl ClientState {
         newp.num_entities = newindex;
         self.frames[newpacket].packet_entities = newp;
         self.frames[newpacket].invalid = false;
+    }
+}
+
+fn apply_string_list(target: &mut Vec<String>, chunk: &StringListChunk) {
+    let start = chunk.start as usize;
+    if target.len() < start {
+        target.resize(start, String::new());
+    }
+    for (i, item) in chunk.items.iter().enumerate() {
+        let index = start + i;
+        if index < target.len() {
+            target[index] = item.clone();
+        } else {
+            target.push(item.clone());
+        }
     }
 }
 
@@ -521,6 +561,52 @@ mod tests {
         assert_eq!(player.ping, 50);
         assert_eq!(player.packet_loss, 2);
         assert_eq!(player.enter_time, 3.5);
+    }
+
+    #[test]
+    fn applies_serverdata_and_lists() {
+        let mut state = ClientState::new();
+        let data = qw_common::ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 9,
+            game_dir: "id1".to_string(),
+            player_num: 1,
+            spectator: false,
+            level_name: "dm2".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        };
+        state.apply_message(&SvcMessage::ServerData(data.clone()), 0);
+        assert_eq!(state.serverdata, Some(data));
+
+        let sound_chunk = qw_common::StringListChunk {
+            start: 0,
+            items: vec!["sound1".to_string(), "sound2".to_string()],
+            next: 2,
+        };
+        state.apply_message(&SvcMessage::SoundList(sound_chunk), 0);
+        assert_eq!(state.sounds.len(), 2);
+        assert_eq!(state.next_sound, Some(2));
+
+        let model_chunk = qw_common::StringListChunk {
+            start: 2,
+            items: vec!["model3".to_string()],
+            next: 0,
+        };
+        state.apply_message(&SvcMessage::ModelList(model_chunk), 0);
+        assert_eq!(state.models.len(), 3);
+        assert_eq!(state.models[2], "model3");
+        assert_eq!(state.next_model, None);
     }
 
     #[test]

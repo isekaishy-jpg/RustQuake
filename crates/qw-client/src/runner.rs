@@ -4,7 +4,9 @@ use crate::client::{Client, ClientPacket};
 use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
-use qw_common::{clc, NetchanError, OobMessage, SizeBuf, SizeBufError, UPDATE_BACKUP, UserCmd};
+use qw_common::{
+    clc, NetchanError, OobMessage, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UserCmd,
+};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -86,6 +88,7 @@ impl ClientRunner {
             let incoming_sequence = self.client.netchan.incoming_sequence();
             for message in messages {
                 self.state.apply_message(message, incoming_sequence);
+                self.handle_signon(message)?;
             }
         }
 
@@ -144,8 +147,44 @@ impl ClientRunner {
         }
         let mut buf = SizeBuf::new(128);
         clc::write_string_cmd(&mut buf, text)?;
-        let packet = self.client.netchan.build_packet(buf.as_slice(), true)?;
+        self.client.netchan.queue_reliable(buf.as_slice())?;
+        let packet = self.client.netchan.build_packet(&[], true)?;
         self.net.send(&packet)?;
+        Ok(())
+    }
+
+    fn handle_signon(&mut self, message: &SvcMessage) -> Result<(), RunnerError> {
+        match message {
+            SvcMessage::ServerData(data) => {
+                let cmd = format!("soundlist {} 0", data.server_count);
+                self.send_string_cmd(&cmd)?;
+            }
+            SvcMessage::SoundList(chunk) => {
+                let Some(data) = &self.state.serverdata else {
+                    return Ok(());
+                };
+                if chunk.next != 0 {
+                    let cmd = format!("soundlist {} {}", data.server_count, chunk.next);
+                    self.send_string_cmd(&cmd)?;
+                } else {
+                    let cmd = format!("modellist {} 0", data.server_count);
+                    self.send_string_cmd(&cmd)?;
+                }
+            }
+            SvcMessage::ModelList(chunk) => {
+                let Some(data) = &self.state.serverdata else {
+                    return Ok(());
+                };
+                if chunk.next != 0 {
+                    let cmd = format!("modellist {} {}", data.server_count, chunk.next);
+                    self.send_string_cmd(&cmd)?;
+                } else {
+                    let cmd = "prespawn".to_string();
+                    self.send_string_cmd(&cmd)?;
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
@@ -156,7 +195,7 @@ mod tests {
     use crate::session::SessionState;
     use qw_common::{
         build_out_of_band, out_of_band_payload, Clc, MsgReader, Netchan, S2C_CHALLENGE,
-        S2C_CONNECTION, SvcMessage, UserCmd, Vec3,
+        S2C_CONNECTION, ServerData, SizeBuf, SvcMessage, UserCmd, Vec3,
     };
     use std::net::UdpSocket;
     use std::time::Duration;
@@ -339,5 +378,64 @@ mod tests {
         let mut reader = MsgReader::new(payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
         assert_eq!(reader.read_string().unwrap(), "prespawn");
+    }
+
+    #[test]
+    fn requests_soundlist_after_serverdata() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let data = ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 42,
+            game_dir: "id1".to_string(),
+            player_num: 1,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        };
+
+        let mut buf = SizeBuf::new(256);
+        qw_common::write_svc_message(&mut buf, &SvcMessage::ServerData(data.clone())).unwrap();
+        let mut server_chan = Netchan::new(27001);
+        let packet = server_chan.build_packet(buf.as_slice(), false).unwrap();
+
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 512];
+        let _ = runner.poll_once(&mut client_buf).unwrap();
+
+        let mut recv_buf = [0u8; 512];
+        let (size, _) = server.recv_from(&mut recv_buf).unwrap();
+        let mut recv_chan = Netchan::new(27001);
+        let payload = recv_chan.process_packet(&recv_buf[..size], true).unwrap();
+
+        let mut reader = MsgReader::new(payload);
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(
+            reader.read_string().unwrap(),
+            format!("soundlist {} 0", data.server_count)
+        );
     }
 }
