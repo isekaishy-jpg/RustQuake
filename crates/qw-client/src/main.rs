@@ -8,6 +8,8 @@ mod runner;
 mod session;
 mod state;
 
+use std::collections::VecDeque;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::cli::{CliAction, DEFAULT_QPORT};
@@ -77,20 +79,40 @@ fn run() -> Result<(), AppError> {
     let mut last_move = Instant::now();
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
+    let mut pending_cmds: VecDeque<String> = VecDeque::new();
+    let (tx, rx) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if stdin.read_line(&mut line).is_err() {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if tx.send(trimmed.to_string()).is_err() {
+                break;
+            }
+        }
+    });
     loop {
-        if let Some(packet) = runner.poll_once(&mut buf)? {
-            if let crate::client::ClientPacket::Messages(_) = packet {
-                for (level, message) in runner.state.prints.drain(..) {
-                    println!("[{level}] {message}");
-                }
-                for message in runner.state.center_prints.drain(..) {
-                    println!("[center] {message}");
-                }
+        if let Some(crate::client::ClientPacket::Messages(_)) = runner.poll_once(&mut buf)? {
+            for (level, message) in runner.state.prints.drain(..) {
+                println!("[{level}] {message}");
+            }
+            for message in runner.state.center_prints.drain(..) {
+                println!("[center] {message}");
             }
         }
 
         if runner.session.state == SessionState::Connected {
             was_connected = true;
+            while let Some(cmd) = pending_cmds.pop_front() {
+                runner.send_string_cmd(&cmd)?;
+            }
             let elapsed = last_move.elapsed();
             if elapsed >= Duration::from_millis(MOVE_INTERVAL_MS) {
                 let mut cmd = UserCmd::default();
@@ -102,6 +124,17 @@ fn run() -> Result<(), AppError> {
             }
         } else if runner.session.state == SessionState::Disconnected && was_connected {
             break;
+        }
+
+        while let Ok(cmd) = rx.try_recv() {
+            if cmd.eq_ignore_ascii_case("quit") || cmd.eq_ignore_ascii_case("exit") {
+                return Ok(());
+            }
+            if runner.session.state == SessionState::Connected {
+                runner.send_string_cmd(&cmd)?;
+            } else {
+                pending_cmds.push_back(cmd);
+            }
         }
 
         std::thread::sleep(Duration::from_millis(1));
