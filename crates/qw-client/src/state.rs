@@ -87,6 +87,7 @@ pub struct ClientState {
     pub next_model: Option<u8>,
     pub view_entity: Option<u16>,
     pub view_angles: Vec3,
+    pub server_version: Option<i32>,
     pub stats: [i32; MAX_CL_STATS],
     pub lightstyles: Vec<String>,
     pub baselines: Vec<EntityState>,
@@ -132,6 +133,7 @@ impl ClientState {
             next_model: None,
             view_entity: None,
             view_angles: Vec3::default(),
+            server_version: None,
             stats: [0; MAX_CL_STATS],
             lightstyles: vec![String::new(); MAX_LIGHTSTYLES],
             baselines,
@@ -160,6 +162,7 @@ impl ClientState {
                 self.sounds.clear();
                 self.models.clear();
                 self.client_data = None;
+                self.server_version = None;
                 self.next_sound = None;
                 self.next_model = None;
                 self.signon_num = None;
@@ -308,6 +311,9 @@ impl ClientState {
             }
             SvcMessage::SetAngle(angles) => {
                 self.view_angles = *angles;
+            }
+            SvcMessage::Version(version) => {
+                self.server_version = Some(*version);
             }
             SvcMessage::ClientData(data) => {
                 self.client_data = Some(data.clone());
@@ -1003,6 +1009,7 @@ mod tests {
         state.apply_message(&SvcMessage::KilledMonster, 0);
         state.apply_message(&SvcMessage::FoundSecret, 0);
         state.apply_message(&SvcMessage::SignonNum(2), 0);
+        state.apply_message(&SvcMessage::Version(28), 0);
         state.apply_message(&SvcMessage::Time(12.5), 0);
         state.apply_message(&SvcMessage::SetPause(true), 0);
 
@@ -1014,6 +1021,7 @@ mod tests {
         assert_eq!(state.stats[STAT_MONSTERS], 1);
         assert_eq!(state.stats[STAT_SECRETS], 1);
         assert_eq!(state.signon_num, Some(2));
+        assert_eq!(state.server_version, Some(28));
         assert_eq!(state.server_time, 12.5);
         assert!(state.paused);
     }
