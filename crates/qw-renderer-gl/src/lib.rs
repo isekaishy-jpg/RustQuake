@@ -41,6 +41,7 @@ pub struct RenderVertex {
 pub struct RenderSurface {
     pub vertices: Vec<RenderVertex>,
     pub indices: Vec<u32>,
+    pub texture_index: Option<usize>,
     pub texture_name: Option<String>,
 }
 
@@ -70,8 +71,8 @@ impl RenderWorld {
         bsp: BspRender,
         palette: Option<&Palette>,
     ) -> Self {
-        let surfaces = build_surfaces(&bsp);
-        let textures = build_textures(&bsp, palette);
+        let (textures, texture_map) = build_textures(&bsp, palette);
+        let surfaces = build_surfaces(&bsp, &texture_map);
         Self {
             map_name: map_name.into(),
             bsp,
@@ -137,7 +138,7 @@ impl Renderer for GlRenderer {
     }
 }
 
-fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
+fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderSurface> {
     let mut surfaces = Vec::new();
     for (index, face) in bsp.faces.iter().enumerate() {
         let verts = match bsp.face_vertices(index) {
@@ -158,10 +159,12 @@ fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
             .collect::<Vec<_>>();
 
         let texture_name = texture_name_for_face(bsp, face);
+        let texture_index = texture_index_for_face(bsp, face, texture_map);
         let indices = triangulate_fan(vertices.len());
         surfaces.push(RenderSurface {
             vertices,
             indices,
+            texture_index,
             texture_name,
         });
     }
@@ -182,13 +185,17 @@ fn triangulate_fan(vertex_count: usize) -> Vec<u32> {
     indices
 }
 
-fn build_textures(bsp: &BspRender, palette: Option<&Palette>) -> Vec<RenderTexture> {
+fn build_textures(
+    bsp: &BspRender,
+    palette: Option<&Palette>,
+) -> (Vec<RenderTexture>, Vec<Option<usize>>) {
+    let mut texture_map = vec![None; bsp.textures.len()];
     let Some(palette) = palette else {
-        return Vec::new();
+        return (Vec::new(), texture_map);
     };
 
     let mut textures = Vec::new();
-    for texture in &bsp.textures {
+    for (index, texture) in bsp.textures.iter().enumerate() {
         let Some(mip) = texture.mip_data.as_ref() else {
             continue;
         };
@@ -210,9 +217,10 @@ fn build_textures(bsp: &BspRender, palette: Option<&Palette>) -> Vec<RenderTextu
             height: mip.height,
             mips,
         });
+        texture_map[index] = Some(textures.len() - 1);
     }
 
-    textures
+    (textures, texture_map)
 }
 
 fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<String> {
@@ -227,6 +235,19 @@ fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<Stri
     } else {
         Some(texture.name.clone())
     }
+}
+
+fn texture_index_for_face(
+    bsp: &BspRender,
+    face: &qw_common::Face,
+    texture_map: &[Option<usize>],
+) -> Option<usize> {
+    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
+    if texinfo.texture_id < 0 {
+        return None;
+    }
+    let index = texinfo.texture_id as usize;
+    texture_map.get(index).and_then(|slot| *slot)
 }
 
 fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f32, f32)> {
@@ -335,8 +356,63 @@ mod tests {
         assert_eq!(world.surfaces.len(), 1);
         assert_eq!(world.surfaces[0].vertices.len(), 4);
         assert_eq!(world.surfaces[0].indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(world.surfaces[0].texture_index, None);
         assert_eq!(world.surfaces[0].vertices[1].tex_coords, [1.0 / 64.0, 0.0]);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
+    }
+
+    #[test]
+    fn assigns_texture_indices_from_mips() {
+        let mut palette_bytes = vec![0u8; 256 * 3];
+        palette_bytes[0] = 10;
+        palette_bytes[1] = 20;
+        palette_bytes[2] = 30;
+        let palette = Palette::from_bytes(&palette_bytes).unwrap();
+
+        let mip = qw_common::MipTexture {
+            width: 2,
+            height: 2,
+            mips: [vec![0; 4], vec![0], vec![0], vec![0]],
+        };
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![qw_common::TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![qw_common::Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0; 4],
+                light_ofs: 0,
+            }],
+            textures: vec![qw_common::BspTexture {
+                name: "wall".to_string(),
+                width: 2,
+                height: 2,
+                offsets: [0; 4],
+                mip_data: Some(mip),
+            }],
+            lighting: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
+        assert_eq!(world.textures.len(), 1);
+        assert_eq!(world.surfaces[0].texture_index, Some(0));
     }
 
     #[test]
