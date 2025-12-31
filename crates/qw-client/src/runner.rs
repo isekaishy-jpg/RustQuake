@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 use crate::client::{Client, ClientPacket};
+use crate::model_cache::{ModelCache, ModelCacheError};
 use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
@@ -25,6 +26,7 @@ pub enum RunnerError {
     Fs(FsError),
     Bsp(BspError),
     Palette(PaletteError),
+    Model(ModelCacheError),
     DataPath(DataPathError),
     MissingGameDir(String),
     NotConnected,
@@ -72,6 +74,12 @@ impl From<PaletteError> for RunnerError {
     }
 }
 
+impl From<ModelCacheError> for RunnerError {
+    fn from(err: ModelCacheError) -> Self {
+        RunnerError::Model(err)
+    }
+}
+
 impl From<DataPathError> for RunnerError {
     fn from(err: DataPathError) -> Self {
         RunnerError::DataPath(err)
@@ -83,6 +91,7 @@ pub struct ClientRunner {
     pub session: Session,
     pub client: Client,
     pub state: ClientState,
+    model_cache: ModelCache,
     start_time: Instant,
     fs_game_dir: Option<String>,
     data_dir: Option<PathBuf>,
@@ -100,6 +109,7 @@ impl ClientRunner {
             session,
             client: Client::new(qport),
             state: ClientState::new(),
+            model_cache: ModelCache::new(),
             start_time: Instant::now(),
             fs_game_dir: None,
             data_dir: None,
@@ -237,6 +247,7 @@ impl ClientRunner {
     fn handle_signon(&mut self, message: &SvcMessage) -> Result<(), RunnerError> {
         match message {
             SvcMessage::ServerData(data) => {
+                self.model_cache.clear();
                 self.download_queue.clear();
                 self.download_seen.clear();
                 let cmd = format!("soundlist {} 0", data.server_count);
@@ -279,6 +290,7 @@ impl ClientRunner {
                     if self.start_next_download()? {
                         self.signon_phase = SignonPhase::Skins;
                     } else {
+                        self.load_models()?;
                         self.download_queue.clear();
                         self.download_seen.clear();
                         self.queue_missing_skins()?;
@@ -476,6 +488,14 @@ impl ClientRunner {
         }
     }
 
+    fn load_models(&mut self) -> Result<(), RunnerError> {
+        self.ensure_palette()?;
+        let palette = self.state.palette.as_ref();
+        self.model_cache
+            .load(&self.client.fs, palette, &self.state.models)?;
+        Ok(())
+    }
+
     fn queue_missing_sounds(&mut self) -> Result<(), RunnerError> {
         for name in &self.state.sounds {
             if name.is_empty() {
@@ -613,6 +633,7 @@ impl ClientRunner {
                 self.send_string_cmd(&cmd)?;
             }
             SignonPhase::Skins => {
+                self.load_models()?;
                 self.download_queue.clear();
                 self.download_seen.clear();
                 self.queue_missing_skins()?;

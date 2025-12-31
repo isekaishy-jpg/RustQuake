@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod handshake;
 mod input;
+mod model_cache;
 mod net;
 mod prediction;
 mod runner;
