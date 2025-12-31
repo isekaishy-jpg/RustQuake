@@ -301,7 +301,11 @@ impl ClientState {
                     let slot = info.num as usize;
                     if let Some(player_state) = state.playerstate.get_mut(slot) {
                         player_state.messagenum = incoming_sequence as i32;
-                        player_state.state_time = self.server_time as f64;
+                        player_state.state_time = if let Some(msec) = info.msec {
+                            self.server_time as f64 - (msec as f64 * 0.001)
+                        } else {
+                            self.server_time as f64
+                        };
                         player_state.flags = info.flags as i32;
                         player_state.origin = info.origin;
                         player_state.velocity = Vec3::new(
@@ -651,12 +655,7 @@ impl ClientState {
         self.sim_angles = from_state.viewangles;
     }
 
-    fn build_physents(
-        &self,
-        frame: &Frame,
-        incoming_sequence: u32,
-        player_num: usize,
-    ) -> Vec<PhysEnt> {
+    fn build_base_physents(&self, frame: &Frame) -> Vec<PhysEnt> {
         let mut physents = Vec::new();
         physents.push(PhysEnt {
             origin: Vec3::default(),
@@ -665,26 +664,6 @@ impl ClientState {
             maxs: Vec3::default(),
             info: 0,
         });
-
-        let player_mins = Vec3::new(-16.0, -16.0, -24.0);
-        let player_maxs = Vec3::new(16.0, 16.0, 32.0);
-
-        let sequence = incoming_sequence as i32;
-        for (index, state) in frame.playerstate.iter().enumerate() {
-            if index == player_num || state.messagenum != sequence || state.modelindex == 0 {
-                continue;
-            }
-            if (state.flags as u32 & PF_DEAD) != 0 {
-                continue;
-            }
-            physents.push(PhysEnt {
-                origin: state.origin,
-                model: None,
-                mins: player_mins,
-                maxs: player_maxs,
-                info: index as i32,
-            });
-        }
 
         let entity_count = frame.packet_entities.num_entities;
         for ent in frame.packet_entities.entities.iter().take(entity_count) {
@@ -707,6 +686,59 @@ impl ClientState {
                 mins: Vec3::default(),
                 maxs: Vec3::default(),
                 info: ent.number,
+            });
+        }
+
+        physents
+    }
+
+    fn build_physents(
+        &self,
+        frame: &Frame,
+        incoming_sequence: u32,
+        player_num: usize,
+    ) -> Vec<PhysEnt> {
+        let base_physents = self.build_base_physents(frame);
+        let mut physents = base_physents.clone();
+
+        let player_mins = Vec3::new(-16.0, -16.0, -24.0);
+        let player_maxs = Vec3::new(16.0, 16.0, 32.0);
+
+        let sequence = incoming_sequence as i32;
+        let playertime = self.server_time as f64;
+        for (index, state) in frame.playerstate.iter().enumerate() {
+            if index == player_num || state.messagenum != sequence || state.modelindex == 0 {
+                continue;
+            }
+            if (state.flags as u32 & PF_DEAD) != 0 {
+                continue;
+            }
+
+            let delta = playertime - state.state_time;
+            let predicted_origin = if delta <= 0.0 {
+                state.origin
+            } else {
+                let mut msec = (delta * 500.0) as i32;
+                if msec > 255 {
+                    msec = 255;
+                }
+                if msec <= 0 {
+                    state.origin
+                } else {
+                    let mut cmd = state.command;
+                    cmd.msec = msec as u8;
+                    self.predict_usercmd_with_physents(state, cmd, false, Some(&base_physents))
+                        .map(|predicted| predicted.origin)
+                        .unwrap_or(state.origin)
+                }
+            };
+
+            physents.push(PhysEnt {
+                origin: predicted_origin,
+                model: None,
+                mins: player_mins,
+                maxs: player_maxs,
+                info: index as i32,
             });
         }
 
