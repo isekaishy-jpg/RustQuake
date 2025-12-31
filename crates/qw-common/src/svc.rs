@@ -18,16 +18,20 @@ pub enum SvcMessage {
     Nop,
     Disconnect,
     ServerData(ServerData),
+    Version(i32),
+    Time(f32),
     Print { level: u8, message: String },
     CenterPrint(String),
     StuffText(String),
     SoundList(StringListChunk),
     ModelList(StringListChunk),
     LightStyle { style: u8, value: String },
+    UpdateName { slot: u8, name: String },
     SetView { entity: u16 },
     SetAngle(Vec3),
     Damage { armor: u8, blood: u8, origin: Vec3 },
     SetPause(bool),
+    SignonNum(u8),
     SpawnStatic(EntityState),
     SpawnStaticSound {
         origin: Vec3,
@@ -48,6 +52,8 @@ pub enum SvcMessage {
     FoundSecret,
     MaxSpeed(f32),
     EntGravity(f32),
+    UpdateColors { slot: u8, colors: u8 },
+    Particle(ParticleEffect),
     TempEntity(TempEntityMessage),
     Sound(SoundMessage),
     StopSound { entity: u16, channel: u8 },
@@ -107,6 +113,14 @@ pub struct SoundMessage {
     pub volume: u8,
     pub attenuation: f32,
     pub origin: Vec3,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleEffect {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub count: u16,
+    pub color: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -537,18 +551,42 @@ fn write_entity_delta(buf: &mut SizeBuf, delta: &EntityDelta) -> Result<(), Size
     Ok(())
 }
 
+fn parse_particle(reader: &mut MsgReader) -> Result<ParticleEffect, MsgReadError> {
+    let origin = Vec3::new(
+        reader.read_coord()?,
+        reader.read_coord()?,
+        reader.read_coord()?,
+    );
+    let direction = Vec3::new(
+        reader.read_i8()? as f32 * (1.0 / 16.0),
+        reader.read_i8()? as f32 * (1.0 / 16.0),
+        reader.read_i8()? as f32 * (1.0 / 16.0),
+    );
+    let msgcount = reader.read_u8()?;
+    let count = if msgcount == 255 { 1024 } else { msgcount as u16 };
+    let color = reader.read_u8()?;
+    Ok(ParticleEffect {
+        origin,
+        direction,
+        count,
+        color,
+    })
+}
+
 pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseError> {
     let cmd = reader.read_u8()?;
     let svc = Svc::try_from(cmd).map_err(|_| SvcParseError::UnknownSvc(cmd))?;
     match svc {
         Svc::Nop => Ok(SvcMessage::Nop),
         Svc::Disconnect => Ok(SvcMessage::Disconnect),
+        Svc::Version => Ok(SvcMessage::Version(reader.read_i32()?)),
         Svc::ServerData => Ok(SvcMessage::ServerData(parse_serverdata(reader).map_err(|err| {
             match err {
                 crate::client_messages::ServerDataError::Read(e) => SvcParseError::Read(e),
                 _ => SvcParseError::UnsupportedSvc(Svc::ServerData),
             }
         })?)),
+        Svc::Time => Ok(SvcMessage::Time(reader.read_f32()?)),
         Svc::Print => {
             let level = reader.read_u8()?;
             let message = reader.read_string()?;
@@ -568,6 +606,11 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let style = reader.read_u8()?;
             let value = reader.read_string()?;
             Ok(SvcMessage::LightStyle { style, value })
+        }
+        Svc::UpdateName => {
+            let slot = reader.read_u8()?;
+            let name = reader.read_string()?;
+            Ok(SvcMessage::UpdateName { slot, name })
         }
         Svc::SetView => {
             let entity = reader.read_u16()?;
@@ -598,6 +641,10 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
         Svc::SetPause => {
             let paused = reader.read_u8()? != 0;
             Ok(SvcMessage::SetPause(paused))
+        }
+        Svc::SignonNum => {
+            let value = reader.read_u8()?;
+            Ok(SvcMessage::SignonNum(value))
         }
         Svc::SpawnStatic => {
             let baseline = parse_baseline(reader)?;
@@ -667,8 +714,15 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let value = reader.read_f32()?;
             Ok(SvcMessage::EntGravity(value))
         }
+        Svc::UpdateColors => {
+            let slot = reader.read_u8()?;
+            let colors = reader.read_u8()?;
+            Ok(SvcMessage::UpdateColors { slot, colors })
+        }
+        Svc::Particle => Ok(SvcMessage::Particle(parse_particle(reader)?)),
         Svc::TempEntity => Ok(SvcMessage::TempEntity(parse_temp_entity(reader)?)),
         Svc::Sound => Ok(SvcMessage::Sound(parse_sound(reader)?)),
+        Svc::ClientData => Err(SvcParseError::UnsupportedSvc(Svc::ClientData)),
         Svc::StopSound => {
             let field = reader.read_u16()?;
             let entity = ((field >> 3) & 1023) as u16;
@@ -835,9 +889,17 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
         SvcMessage::Disconnect => {
             buf.write_u8(Svc::Disconnect as u8)?;
         }
+        SvcMessage::Version(value) => {
+            buf.write_u8(Svc::Version as u8)?;
+            buf.write_i32(*value)?;
+        }
         SvcMessage::ServerData(data) => {
             buf.write_u8(Svc::ServerData as u8)?;
             crate::client_messages::write_serverdata(buf, data)?;
+        }
+        SvcMessage::Time(value) => {
+            buf.write_u8(Svc::Time as u8)?;
+            buf.write_f32(*value)?;
         }
         SvcMessage::Print { level, message } => {
             buf.write_u8(Svc::Print as u8)?;
@@ -865,6 +927,11 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             buf.write_u8(*style)?;
             buf.write_string(Some(value))?;
         }
+        SvcMessage::UpdateName { slot, name } => {
+            buf.write_u8(Svc::UpdateName as u8)?;
+            buf.write_u8(*slot)?;
+            buf.write_string(Some(name))?;
+        }
         SvcMessage::SetView { entity } => {
             buf.write_u8(Svc::SetView as u8)?;
             buf.write_u16(*entity)?;
@@ -890,6 +957,10 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
         SvcMessage::SetPause(paused) => {
             buf.write_u8(Svc::SetPause as u8)?;
             buf.write_u8(if *paused { 1 } else { 0 })?;
+        }
+        SvcMessage::SignonNum(value) => {
+            buf.write_u8(Svc::SignonNum as u8)?;
+            buf.write_u8(*value)?;
         }
         SvcMessage::SpawnStatic(baseline) => {
             buf.write_u8(Svc::SpawnStatic as u8)?;
@@ -962,6 +1033,28 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
         SvcMessage::EntGravity(value) => {
             buf.write_u8(Svc::EntGravity as u8)?;
             buf.write_f32(*value)?;
+        }
+        SvcMessage::UpdateColors { slot, colors } => {
+            buf.write_u8(Svc::UpdateColors as u8)?;
+            buf.write_u8(*slot)?;
+            buf.write_u8(*colors)?;
+        }
+        SvcMessage::Particle(effect) => {
+            buf.write_u8(Svc::Particle as u8)?;
+            buf.write_coord(effect.origin.x)?;
+            buf.write_coord(effect.origin.y)?;
+            buf.write_coord(effect.origin.z)?;
+            let dir = effect.direction;
+            buf.write_i8((dir.x * 16.0).round().clamp(-128.0, 127.0) as i8)?;
+            buf.write_i8((dir.y * 16.0).round().clamp(-128.0, 127.0) as i8)?;
+            buf.write_i8((dir.z * 16.0).round().clamp(-128.0, 127.0) as i8)?;
+            let msgcount = if effect.count >= 1024 {
+                255
+            } else {
+                effect.count.min(254) as u8
+            };
+            buf.write_u8(msgcount)?;
+            buf.write_u8(effect.color)?;
         }
         SvcMessage::TempEntity(temp) => {
             buf.write_u8(Svc::TempEntity as u8)?;
@@ -1474,6 +1567,77 @@ mod tests {
         let mut reader = MsgReader::new(buf.as_slice());
         assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::SmallKick);
         assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::BigKick);
+    }
+
+    #[test]
+    fn parses_time_and_version() {
+        let mut buf = SizeBuf::new(16);
+        write_svc_message(&mut buf, &SvcMessage::Version(28)).unwrap();
+        write_svc_message(&mut buf, &SvcMessage::Time(12.5)).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::Version(28));
+        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::Time(12.5));
+    }
+
+    #[test]
+    fn parses_update_name_and_colors() {
+        let mut buf = SizeBuf::new(32);
+        write_svc_message(
+            &mut buf,
+            &SvcMessage::UpdateName {
+                slot: 2,
+                name: "unit".to_string(),
+            },
+        )
+        .unwrap();
+        write_svc_message(
+            &mut buf,
+            &SvcMessage::UpdateColors {
+                slot: 2,
+                colors: 0x3f,
+            },
+        )
+        .unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::UpdateName {
+                slot: 2,
+                name: "unit".to_string()
+            }
+        );
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::UpdateColors {
+                slot: 2,
+                colors: 0x3f
+            }
+        );
+    }
+
+    #[test]
+    fn parses_signon_and_particle() {
+        let effect = ParticleEffect {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            direction: Vec3::new(0.25, -0.5, 0.75),
+            count: 12,
+            color: 7,
+        };
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(&mut buf, &SvcMessage::SignonNum(3)).unwrap();
+        write_svc_message(&mut buf, &SvcMessage::Particle(effect.clone())).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::SignonNum(3)
+        );
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::Particle(effect)
+        );
     }
 
     #[test]

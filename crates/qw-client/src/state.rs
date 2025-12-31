@@ -52,6 +52,10 @@ pub struct ClientState {
     pub baselines: Vec<EntityState>,
     pub frames: Vec<Frame>,
     pub valid_sequence: i32,
+    pub server_time: f32,
+    pub signon_num: Option<u8>,
+    pub particle_effects: Vec<qw_common::ParticleEffect>,
+    pub temp_entities: Vec<qw_common::TempEntityMessage>,
     pub paused: bool,
 }
 
@@ -78,6 +82,10 @@ impl ClientState {
             baselines,
             frames,
             valid_sequence: 0,
+            server_time: 0.0,
+            signon_num: None,
+            particle_effects: Vec::new(),
+            temp_entities: Vec::new(),
             paused: false,
         }
     }
@@ -90,6 +98,12 @@ impl ClientState {
                 self.models.clear();
                 self.next_sound = None;
                 self.next_model = None;
+                self.signon_num = None;
+                self.particle_effects.clear();
+                self.temp_entities.clear();
+            }
+            SvcMessage::Time(value) => {
+                self.server_time = *value;
             }
             SvcMessage::UpdateUserInfo {
                 slot,
@@ -104,6 +118,19 @@ impl ClientState {
             SvcMessage::SetInfo { slot, key, value } => {
                 if let Some(player) = self.players.get_mut(*slot as usize) {
                     let _ = player.userinfo.set(key, value);
+                }
+            }
+            SvcMessage::UpdateName { slot, name } => {
+                if let Some(player) = self.players.get_mut(*slot as usize) {
+                    let _ = player.userinfo.set("name", name);
+                }
+            }
+            SvcMessage::UpdateColors { slot, colors } => {
+                if let Some(player) = self.players.get_mut(*slot as usize) {
+                    let top = colors >> 4;
+                    let bottom = colors & 0x0f;
+                    let _ = player.userinfo.set("topcolor", &top.to_string());
+                    let _ = player.userinfo.set("bottomcolor", &bottom.to_string());
                 }
             }
             SvcMessage::ServerInfo { key, value } => {
@@ -153,6 +180,9 @@ impl ClientState {
             SvcMessage::SetAngle(angles) => {
                 self.view_angles = *angles;
             }
+            SvcMessage::SignonNum(value) => {
+                self.signon_num = Some(*value);
+            }
             SvcMessage::SetPause(paused) => {
                 self.paused = *paused;
             }
@@ -189,6 +219,12 @@ impl ClientState {
                 if let Some(data) = &mut self.serverdata {
                     data.movevars.entgravity = *value;
                 }
+            }
+            SvcMessage::Particle(effect) => {
+                self.particle_effects.push(effect.clone());
+            }
+            SvcMessage::TempEntity(temp) => {
+                self.temp_entities.push(temp.clone());
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -382,6 +418,29 @@ mod tests {
             0,
         );
         assert!(state.players[2].userinfo.as_str().contains("\\team\\red"));
+    }
+
+    #[test]
+    fn applies_update_name_and_colors() {
+        let mut state = ClientState::new();
+        state.apply_message(
+            &SvcMessage::UpdateName {
+                slot: 0,
+                name: "unit".to_string(),
+            },
+            0,
+        );
+        state.apply_message(
+            &SvcMessage::UpdateColors {
+                slot: 0,
+                colors: 0x3f,
+            },
+            0,
+        );
+        let info = state.players[0].userinfo.as_str();
+        assert!(info.contains("\\name\\unit"));
+        assert!(info.contains("\\topcolor\\3"));
+        assert!(info.contains("\\bottomcolor\\15"));
     }
 
     #[test]
@@ -691,6 +750,8 @@ mod tests {
         );
         state.apply_message(&SvcMessage::KilledMonster, 0);
         state.apply_message(&SvcMessage::FoundSecret, 0);
+        state.apply_message(&SvcMessage::SignonNum(2), 0);
+        state.apply_message(&SvcMessage::Time(12.5), 0);
         state.apply_message(&SvcMessage::SetPause(true), 0);
 
         assert_eq!(state.view_entity, Some(12));
@@ -700,7 +761,33 @@ mod tests {
         assert_eq!(state.stats[5], 1024);
         assert_eq!(state.stats[STAT_MONSTERS], 1);
         assert_eq!(state.stats[STAT_SECRETS], 1);
+        assert_eq!(state.signon_num, Some(2));
+        assert_eq!(state.server_time, 12.5);
         assert!(state.paused);
+    }
+
+    #[test]
+    fn queues_temp_entities_and_particles() {
+        let mut state = ClientState::new();
+        let temp = qw_common::TempEntityMessage {
+            kind: qw_common::TE_SPIKE,
+            origin: Some(Vec3::new(1.0, 2.0, 3.0)),
+            start: None,
+            end: None,
+            count: None,
+            entity: None,
+        };
+        let particle = qw_common::ParticleEffect {
+            origin: Vec3::new(0.0, 1.0, 2.0),
+            direction: Vec3::new(0.0, 0.0, 1.0),
+            count: 8,
+            color: 5,
+        };
+        state.apply_message(&SvcMessage::TempEntity(temp.clone()), 0);
+        state.apply_message(&SvcMessage::Particle(particle.clone()), 0);
+
+        assert_eq!(state.temp_entities, vec![temp]);
+        assert_eq!(state.particle_effects, vec![particle]);
     }
 
     #[test]
