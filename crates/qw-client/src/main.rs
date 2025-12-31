@@ -24,8 +24,10 @@ use crate::session::{Session, SessionState};
 use crate::sound::SoundManager;
 use crate::state::ClientState;
 use qw_audio::{AudioConfig, AudioSystem};
-use qw_common::{InfoError, InfoString};
-use qw_renderer_gl::{GlRenderer, RenderView, RenderWorld, Renderer, RendererConfig};
+use qw_common::{InfoError, InfoString, UPDATE_MASK};
+use qw_renderer_gl::{
+    GlRenderer, RenderEntity, RenderEntityKind, RenderView, RenderWorld, Renderer, RendererConfig,
+};
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
@@ -214,6 +216,8 @@ fn run() -> Result<(), AppError> {
 
         if audio.is_running() {
             renderer.set_view(build_render_view(&runner.state));
+            let incoming = runner.client.netchan.incoming_sequence();
+            renderer.set_entities(build_render_entities(&runner.state, incoming));
             renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
             renderer.end_frame();
@@ -396,6 +400,57 @@ fn build_render_view(state: &ClientState) -> RenderView {
         origin,
         angles,
         fov_y: 90.0,
+    }
+}
+
+fn build_render_entities(state: &ClientState, incoming_sequence: u32) -> Vec<RenderEntity> {
+    let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
+    let frame = &state.frames[frame_index];
+    let mut entities = Vec::new();
+
+    let entity_count = frame.packet_entities.num_entities;
+    for ent in frame.packet_entities.entities.iter().take(entity_count) {
+        push_render_entity(&mut entities, &state.models, ent);
+    }
+
+    for ent in &state.static_entities {
+        push_render_entity(&mut entities, &state.models, ent);
+    }
+
+    entities
+}
+
+fn push_render_entity(
+    entities: &mut Vec<RenderEntity>,
+    models: &[String],
+    ent: &qw_common::EntityState,
+) {
+    if ent.modelindex <= 0 {
+        return;
+    }
+    let model_index = ent.modelindex as usize;
+    let Some(name) = models.get(model_index) else {
+        return;
+    };
+    let kind = model_kind_from_name(name);
+    entities.push(RenderEntity {
+        kind,
+        model_index,
+        origin: ent.origin,
+        angles: ent.angles,
+        frame: ent.frame.max(0) as u32,
+        skin: ent.skinnum.max(0) as u32,
+        alpha: 1.0,
+    });
+}
+
+fn model_kind_from_name(name: &str) -> RenderEntityKind {
+    if name.starts_with('*') {
+        RenderEntityKind::Brush
+    } else if name.to_ascii_lowercase().ends_with(".spr") {
+        RenderEntityKind::Sprite
+    } else {
+        RenderEntityKind::Alias
     }
 }
 

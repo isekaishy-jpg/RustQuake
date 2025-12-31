@@ -109,6 +109,32 @@ pub struct RenderWorld {
     pub textures: Vec<RenderTexture>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderEntityKind {
+    Brush,
+    Alias,
+    Sprite,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderEntity {
+    pub kind: RenderEntityKind,
+    pub model_index: usize,
+    pub origin: Vec3,
+    pub angles: Vec3,
+    pub frame: u32,
+    pub skin: u32,
+    pub alpha: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderDrawList {
+    pub opaque_surfaces: Vec<usize>,
+    pub transparent_surfaces: Vec<usize>,
+    pub opaque_entities: Vec<RenderEntity>,
+    pub transparent_entities: Vec<RenderEntity>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GpuTexture {
     pub width: u32,
@@ -201,12 +227,53 @@ fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
     }
 }
 
+fn build_draw_list(world: &RenderWorld, entities: &[RenderEntity]) -> RenderDrawList {
+    let mut opaque_surfaces = Vec::new();
+    let mut transparent_surfaces = Vec::new();
+    for (index, surface) in world.surfaces.iter().enumerate() {
+        if is_transparent_surface(surface) {
+            transparent_surfaces.push(index);
+        } else {
+            opaque_surfaces.push(index);
+        }
+    }
+
+    let mut opaque_entities = Vec::new();
+    let mut transparent_entities = Vec::new();
+    for entity in entities {
+        if is_transparent_entity(entity) {
+            transparent_entities.push(entity.clone());
+        } else {
+            opaque_entities.push(entity.clone());
+        }
+    }
+
+    RenderDrawList {
+        opaque_surfaces,
+        transparent_surfaces,
+        opaque_entities,
+        transparent_entities,
+    }
+}
+
+fn is_transparent_surface(surface: &RenderSurface) -> bool {
+    surface
+        .texture_name
+        .as_deref()
+        .is_some_and(|name| name.starts_with('{'))
+}
+
+fn is_transparent_entity(entity: &RenderEntity) -> bool {
+    entity.alpha < 1.0 || matches!(entity.kind, RenderEntityKind::Sprite)
+}
+
 #[derive(Debug, Clone)]
 pub struct GlRenderer {
     config: RendererConfig,
     frame_index: u64,
     last_view: Option<RenderView>,
     last_world: Option<RenderWorld>,
+    entities: Vec<RenderEntity>,
     gpu_world: Option<GpuWorld>,
 }
 
@@ -217,6 +284,7 @@ impl GlRenderer {
             frame_index: 0,
             last_view: None,
             last_world: None,
+            entities: Vec::new(),
             gpu_world: None,
         }
     }
@@ -240,6 +308,15 @@ impl GlRenderer {
 
     pub fn world(&self) -> Option<&RenderWorld> {
         self.last_world.as_ref()
+    }
+
+    pub fn set_entities(&mut self, entities: Vec<RenderEntity>) {
+        self.entities = entities;
+    }
+
+    pub fn draw_list(&self) -> Option<RenderDrawList> {
+        let world = self.last_world.as_ref()?;
+        Some(build_draw_list(world, &self.entities))
     }
 
     pub fn gpu_world(&self) -> Option<&GpuWorld> {
@@ -588,6 +665,124 @@ mod tests {
         assert_eq!(renderer.world(), Some(&world));
     }
 
+    #[test]
+    fn builds_draw_list_with_transparent_surfaces() {
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![
+                qw_common::TexInfo {
+                    s_vec: Vec3::new(1.0, 0.0, 0.0),
+                    s_offset: 0.0,
+                    t_vec: Vec3::new(0.0, 1.0, 0.0),
+                    t_offset: 0.0,
+                    texture_id: 0,
+                    flags: 0,
+                },
+                qw_common::TexInfo {
+                    s_vec: Vec3::new(1.0, 0.0, 0.0),
+                    s_offset: 0.0,
+                    t_vec: Vec3::new(0.0, 1.0, 0.0),
+                    t_offset: 0.0,
+                    texture_id: 1,
+                    flags: 0,
+                },
+            ],
+            faces: vec![
+                qw_common::Face {
+                    plane_num: 0,
+                    side: 0,
+                    first_edge: 0,
+                    num_edges: 4,
+                    texinfo: 0,
+                    styles: [255; 4],
+                    light_ofs: -1,
+                },
+                qw_common::Face {
+                    plane_num: 0,
+                    side: 0,
+                    first_edge: 0,
+                    num_edges: 4,
+                    texinfo: 1,
+                    styles: [255; 4],
+                    light_ofs: -1,
+                },
+            ],
+            textures: vec![
+                qw_common::BspTexture {
+                    name: "wall".to_string(),
+                    width: 64,
+                    height: 64,
+                    offsets: [0; 4],
+                    mip_data: None,
+                },
+                qw_common::BspTexture {
+                    name: "{water".to_string(),
+                    width: 64,
+                    height: 64,
+                    offsets: [0; 4],
+                    mip_data: None,
+                },
+            ],
+            lighting: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        renderer.set_world(world);
+        let draw_list = renderer.draw_list().unwrap();
+        assert_eq!(draw_list.opaque_surfaces, vec![0]);
+        assert_eq!(draw_list.transparent_surfaces, vec![1]);
+    }
+
+    #[test]
+    fn builds_draw_list_with_transparent_entities() {
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        renderer.set_entities(vec![
+            RenderEntity {
+                kind: RenderEntityKind::Alias,
+                model_index: 1,
+                origin: Vec3::default(),
+                angles: Vec3::default(),
+                frame: 0,
+                skin: 0,
+                alpha: 1.0,
+            },
+            RenderEntity {
+                kind: RenderEntityKind::Sprite,
+                model_index: 2,
+                origin: Vec3::default(),
+                angles: Vec3::default(),
+                frame: 0,
+                skin: 0,
+                alpha: 1.0,
+            },
+        ]);
+
+        let world = RenderWorld::from_bsp(
+            "maps/start.bsp",
+            BspRender {
+                vertices: Vec::new(),
+                edges: Vec::new(),
+                surf_edges: Vec::new(),
+                texinfo: Vec::new(),
+                faces: Vec::new(),
+                textures: Vec::new(),
+                lighting: Vec::new(),
+            },
+        );
+        renderer.set_world(world);
+        let draw_list = renderer.draw_list().unwrap();
+        assert_eq!(draw_list.opaque_entities.len(), 1);
+        assert_eq!(draw_list.transparent_entities.len(), 1);
+        assert_eq!(draw_list.transparent_entities[0].model_index, 2);
+    }
     #[test]
     fn builds_gpu_world_lightmaps() {
         let mut lighting = Vec::new();
