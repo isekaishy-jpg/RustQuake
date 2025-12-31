@@ -5,9 +5,11 @@ use crate::msg::{MsgReadError, MsgReader, SizeBuf, SizeBufError};
 use crate::protocol::{
     Svc, PF_COMMAND, PF_EFFECTS, PF_MSEC, PF_MODEL, PF_SKINNUM, PF_VELOCITY1, PF_VELOCITY2,
     PF_VELOCITY3, PF_WEAPONFRAME, DEFAULT_SOUND_PACKET_ATTENUATION,
-    DEFAULT_SOUND_PACKET_VOLUME, SND_ATTENUATION, SND_VOLUME, U_ANGLE1, U_ANGLE2, U_ANGLE3,
-    U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1, U_ORIGIN2, U_ORIGIN3,
-    U_REMOVE, U_SKIN, U_SOLID,
+    DEFAULT_SOUND_PACKET_VOLUME, SND_ATTENUATION, SND_VOLUME, TE_BLOOD, TE_EXPLOSION,
+    TE_GUNSHOT, TE_KNIGHTSPIKE, TE_LAVASPLASH, TE_LIGHTNING1, TE_LIGHTNING2, TE_LIGHTNING3,
+    TE_LIGHTNINGBLOOD, TE_SPIKE, TE_SUPERSPIKE, TE_TAREXPLOSION, TE_TELEPORT, TE_WIZSPIKE,
+    U_ANGLE1, U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS,
+    U_ORIGIN1, U_ORIGIN2, U_ORIGIN3, U_REMOVE, U_SKIN, U_SOLID,
 };
 use crate::types::{EntityState, UserCmd, Vec3};
 
@@ -36,11 +38,17 @@ pub enum SvcMessage {
     Intermission { origin: Vec3, angles: Vec3 },
     Finale(String),
     CdTrack(u8),
+    SellScreen,
+    SmallKick,
+    BigKick,
     MuzzleFlash { entity: u16 },
     UpdateStat { index: u8, value: u8 },
     UpdateStatLong { index: u8, value: i32 },
     KilledMonster,
     FoundSecret,
+    MaxSpeed(f32),
+    EntGravity(f32),
+    TempEntity(TempEntityMessage),
     Sound(SoundMessage),
     StopSound { entity: u16, channel: u8 },
     Download {
@@ -99,6 +107,16 @@ pub struct SoundMessage {
     pub volume: u8,
     pub attenuation: f32,
     pub origin: Vec3,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TempEntityMessage {
+    pub kind: u8,
+    pub origin: Option<Vec3>,
+    pub start: Option<Vec3>,
+    pub end: Option<Vec3>,
+    pub count: Option<u8>,
+    pub entity: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -372,6 +390,73 @@ fn parse_entity_delta(reader: &mut MsgReader, word: u16) -> Result<EntityDelta, 
     })
 }
 
+fn parse_temp_entity(reader: &mut MsgReader) -> Result<TempEntityMessage, SvcParseError> {
+    let kind = reader.read_u8()?;
+    match kind {
+        TE_LIGHTNING1 | TE_LIGHTNING2 | TE_LIGHTNING3 => {
+            let entity = reader.read_u16()?;
+            let start = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            let end = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            Ok(TempEntityMessage {
+                kind,
+                origin: None,
+                start: Some(start),
+                end: Some(end),
+                count: None,
+                entity: Some(entity),
+            })
+        }
+        TE_GUNSHOT | TE_BLOOD => {
+            let count = reader.read_u8()?;
+            let origin = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            Ok(TempEntityMessage {
+                kind,
+                origin: Some(origin),
+                start: None,
+                end: None,
+                count: Some(count),
+                entity: None,
+            })
+        }
+        TE_SPIKE
+        | TE_SUPERSPIKE
+        | TE_WIZSPIKE
+        | TE_KNIGHTSPIKE
+        | TE_EXPLOSION
+        | TE_TAREXPLOSION
+        | TE_LAVASPLASH
+        | TE_TELEPORT
+        | TE_LIGHTNINGBLOOD => {
+            let origin = Vec3::new(
+                reader.read_coord()?,
+                reader.read_coord()?,
+                reader.read_coord()?,
+            );
+            Ok(TempEntityMessage {
+                kind,
+                origin: Some(origin),
+                start: None,
+                end: None,
+                count: None,
+                entity: None,
+            })
+        }
+        _ => Err(SvcParseError::UnsupportedSvc(Svc::TempEntity)),
+    }
+}
+
 fn parse_packet_entities(
     reader: &mut MsgReader,
     delta: bool,
@@ -555,6 +640,9 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let track = reader.read_u8()?;
             Ok(SvcMessage::CdTrack(track))
         }
+        Svc::SellScreen => Ok(SvcMessage::SellScreen),
+        Svc::SmallKick => Ok(SvcMessage::SmallKick),
+        Svc::BigKick => Ok(SvcMessage::BigKick),
         Svc::MuzzleFlash => {
             let entity = reader.read_u16()?;
             Ok(SvcMessage::MuzzleFlash { entity })
@@ -571,6 +659,15 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
         }
         Svc::KilledMonster => Ok(SvcMessage::KilledMonster),
         Svc::FoundSecret => Ok(SvcMessage::FoundSecret),
+        Svc::MaxSpeed => {
+            let value = reader.read_f32()?;
+            Ok(SvcMessage::MaxSpeed(value))
+        }
+        Svc::EntGravity => {
+            let value = reader.read_f32()?;
+            Ok(SvcMessage::EntGravity(value))
+        }
+        Svc::TempEntity => Ok(SvcMessage::TempEntity(parse_temp_entity(reader)?)),
         Svc::Sound => Ok(SvcMessage::Sound(parse_sound(reader)?)),
         Svc::StopSound => {
             let field = reader.read_u16()?;
@@ -829,6 +926,15 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             buf.write_u8(Svc::CdTrack as u8)?;
             buf.write_u8(*track)?;
         }
+        SvcMessage::SellScreen => {
+            buf.write_u8(Svc::SellScreen as u8)?;
+        }
+        SvcMessage::SmallKick => {
+            buf.write_u8(Svc::SmallKick as u8)?;
+        }
+        SvcMessage::BigKick => {
+            buf.write_u8(Svc::BigKick as u8)?;
+        }
         SvcMessage::MuzzleFlash { entity } => {
             buf.write_u8(Svc::MuzzleFlash as u8)?;
             buf.write_u16(*entity)?;
@@ -848,6 +954,39 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
         }
         SvcMessage::FoundSecret => {
             buf.write_u8(Svc::FoundSecret as u8)?;
+        }
+        SvcMessage::MaxSpeed(value) => {
+            buf.write_u8(Svc::MaxSpeed as u8)?;
+            buf.write_f32(*value)?;
+        }
+        SvcMessage::EntGravity(value) => {
+            buf.write_u8(Svc::EntGravity as u8)?;
+            buf.write_f32(*value)?;
+        }
+        SvcMessage::TempEntity(temp) => {
+            buf.write_u8(Svc::TempEntity as u8)?;
+            buf.write_u8(temp.kind)?;
+            if let Some(entity) = temp.entity {
+                buf.write_u16(entity)?;
+            }
+            if let Some(count) = temp.count {
+                buf.write_u8(count)?;
+            }
+            if let Some(origin) = temp.origin {
+                buf.write_coord(origin.x)?;
+                buf.write_coord(origin.y)?;
+                buf.write_coord(origin.z)?;
+            }
+            if let Some(start) = temp.start {
+                buf.write_coord(start.x)?;
+                buf.write_coord(start.y)?;
+                buf.write_coord(start.z)?;
+            }
+            if let Some(end) = temp.end {
+                buf.write_coord(end.x)?;
+                buf.write_coord(end.y)?;
+                buf.write_coord(end.z)?;
+            }
         }
         SvcMessage::Sound(sound) => {
             buf.write_u8(Svc::Sound as u8)?;
@@ -1268,6 +1407,73 @@ mod tests {
                 seconds_ago: 2.5
             }
         );
+    }
+
+    #[test]
+    fn parses_maxspeed() {
+        let mut buf = SizeBuf::new(32);
+        write_svc_message(&mut buf, &SvcMessage::MaxSpeed(420.0)).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::MaxSpeed(420.0));
+    }
+
+    #[test]
+    fn parses_entgravity() {
+        let mut buf = SizeBuf::new(32);
+        write_svc_message(&mut buf, &SvcMessage::EntGravity(0.75)).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::EntGravity(0.75));
+    }
+
+    #[test]
+    fn parses_temp_entity_gunshot() {
+        let temp = TempEntityMessage {
+            kind: TE_GUNSHOT,
+            origin: Some(Vec3::new(1.0, 2.0, 3.0)),
+            start: None,
+            end: None,
+            count: Some(4),
+            entity: None,
+        };
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(&mut buf, &SvcMessage::TempEntity(temp.clone())).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::TempEntity(temp));
+    }
+
+    #[test]
+    fn parses_temp_entity_lightning() {
+        let temp = TempEntityMessage {
+            kind: TE_LIGHTNING1,
+            origin: None,
+            start: Some(Vec3::new(0.0, 1.0, 2.0)),
+            end: Some(Vec3::new(3.0, 4.0, 5.0)),
+            count: None,
+            entity: Some(12),
+        };
+        let mut buf = SizeBuf::new(64);
+        write_svc_message(&mut buf, &SvcMessage::TempEntity(temp.clone())).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::TempEntity(temp));
+    }
+
+    #[test]
+    fn parses_kick_messages() {
+        let mut buf = SizeBuf::new(8);
+        write_svc_message(&mut buf, &SvcMessage::SmallKick).unwrap();
+        write_svc_message(&mut buf, &SvcMessage::BigKick).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::SmallKick);
+        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::BigKick);
     }
 
     #[test]

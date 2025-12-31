@@ -35,6 +35,10 @@ pub fn locate_data_dir() -> Result<PathBuf, DataPathError> {
         return Ok(PathBuf::from(dir));
     }
 
+    if let Some(dir) = find_default_quake_dir() {
+        return Ok(dir);
+    }
+
     Err(DataPathError::NotFound)
 }
 
@@ -76,6 +80,28 @@ fn parse_quake_dir(contents: &str) -> Option<String> {
     }
 
     None
+}
+
+fn find_default_quake_dir() -> Option<PathBuf> {
+    for path in default_quake_paths() {
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn default_quake_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if cfg!(windows) {
+        if let Ok(pf86) = env::var("ProgramFiles(x86)") {
+            paths.push(PathBuf::from(pf86).join("Steam\\steamapps\\common\\Quake"));
+        }
+        if let Ok(pf) = env::var("ProgramFiles") {
+            paths.push(PathBuf::from(pf).join("Steam\\steamapps\\common\\Quake"));
+        }
+    }
+    paths
 }
 
 #[cfg(test)]

@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::block_checksum;
+
 pub const BSP_VERSION: i32 = 29;
 pub const HEADER_LUMPS: usize = 15;
 
@@ -98,6 +100,27 @@ impl Bsp {
             .to_string();
         Ok(text)
     }
+
+    pub fn map_checksums(&self) -> Result<(u32, u32), BspError> {
+        let mut checksum = 0u32;
+        let mut checksum2 = 0u32;
+
+        for i in 0..HEADER_LUMPS {
+            if i == LUMP_ENTITIES {
+                continue;
+            }
+            let data = self.lump_slice(i)?;
+            let value = block_checksum(data);
+            checksum ^= value;
+
+            if i == LUMP_VISIBILITY || i == LUMP_LEAFS || i == LUMP_NODES {
+                continue;
+            }
+            checksum2 ^= value;
+        }
+
+        Ok((checksum, checksum2))
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +166,52 @@ mod tests {
         let bsp = Bsp::from_bytes(data).unwrap();
         let text = bsp.entities_text().unwrap();
         assert_eq!(text, "{\"classname\" \"worldspawn\"}\n");
+    }
+
+    #[test]
+    fn computes_map_checksums() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&BSP_VERSION.to_le_bytes());
+
+        let header_size = 4 + HEADER_LUMPS * 8;
+        let mut offsets = Vec::with_capacity(HEADER_LUMPS);
+        let mut payloads = Vec::with_capacity(HEADER_LUMPS);
+        let mut cursor = header_size;
+
+        for i in 0..HEADER_LUMPS {
+            let payload = vec![i as u8; 4];
+            offsets.push((cursor as u32, payload.len() as u32));
+            cursor += payload.len();
+            payloads.push(payload);
+        }
+
+        for (offset, length) in &offsets {
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&length.to_le_bytes());
+        }
+
+        for payload in &payloads {
+            data.extend_from_slice(payload);
+        }
+
+        let bsp = Bsp::from_bytes(data).unwrap();
+        let (checksum, checksum2) = bsp.map_checksums().unwrap();
+
+        let mut expected = 0u32;
+        let mut expected2 = 0u32;
+        for i in 0..HEADER_LUMPS {
+            if i == LUMP_ENTITIES {
+                continue;
+            }
+            let value = block_checksum(&payloads[i]);
+            expected ^= value;
+            if i == LUMP_VISIBILITY || i == LUMP_LEAFS || i == LUMP_NODES {
+                continue;
+            }
+            expected2 ^= value;
+        }
+
+        assert_eq!(checksum, expected);
+        assert_eq!(checksum2, expected2);
     }
 }

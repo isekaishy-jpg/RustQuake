@@ -5,8 +5,10 @@ use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
-    clc, NetchanError, OobMessage, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UserCmd,
+    clc, find_game_dir, find_id1_dir, locate_data_dir, Bsp, BspError, DataPathError, FsError,
+    NetchanError, OobMessage, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UserCmd,
 };
+use std::path::PathBuf;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -15,6 +17,10 @@ pub enum RunnerError {
     Client(crate::client::ClientError),
     Netchan(NetchanError),
     Buffer(SizeBufError),
+    Fs(FsError),
+    Bsp(BspError),
+    DataPath(DataPathError),
+    MissingGameDir(String),
     NotConnected,
 }
 
@@ -42,11 +48,31 @@ impl From<SizeBufError> for RunnerError {
     }
 }
 
+impl From<FsError> for RunnerError {
+    fn from(err: FsError) -> Self {
+        RunnerError::Fs(err)
+    }
+}
+
+impl From<BspError> for RunnerError {
+    fn from(err: BspError) -> Self {
+        RunnerError::Bsp(err)
+    }
+}
+
+impl From<DataPathError> for RunnerError {
+    fn from(err: DataPathError) -> Self {
+        RunnerError::DataPath(err)
+    }
+}
+
 pub struct ClientRunner {
     pub net: NetClient,
     pub session: Session,
     pub client: Client,
     pub state: ClientState,
+    fs_game_dir: Option<String>,
+    data_dir: Option<PathBuf>,
 }
 
 impl ClientRunner {
@@ -57,6 +83,8 @@ impl ClientRunner {
             session,
             client: Client::new(qport),
             state: ClientState::new(),
+            fs_game_dir: None,
+            data_dir: None,
         }
     }
 
@@ -79,6 +107,7 @@ impl ClientRunner {
                 }
                 if matches!(msg, OobMessage::Connection(_)) {
                     self.session.state = crate::session::SessionState::Connected;
+                    self.send_string_cmd("new")?;
                 }
             }
             ClientPacket::Messages(_) => {}
@@ -172,20 +201,101 @@ impl ClientRunner {
                 }
             }
             SvcMessage::ModelList(chunk) => {
-                let Some(data) = &self.state.serverdata else {
+                let Some(data) = self.state.serverdata.clone() else {
                     return Ok(());
                 };
                 if chunk.next != 0 {
                     let cmd = format!("modellist {} {}", data.server_count, chunk.next);
                     self.send_string_cmd(&cmd)?;
                 } else {
-                    let cmd = "prespawn".to_string();
+                    let checksum2 = self.map_checksum2(&data)?;
+                    let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
                     self.send_string_cmd(&cmd)?;
                 }
+            }
+            SvcMessage::StuffText(text) => {
+                self.handle_stufftext(text)?;
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn map_checksum2(&mut self, data: &qw_common::ServerData) -> Result<u32, RunnerError> {
+        self.ensure_filesystem(data)?;
+        let map_name = map_path(&data.level_name);
+        let bytes = self.client.fs.read(&map_name)?;
+        let bsp = Bsp::from_bytes(bytes)?;
+        let (_, checksum2) = bsp.map_checksums()?;
+        Ok(checksum2)
+    }
+
+    fn handle_stufftext(&mut self, text: &str) -> Result<(), RunnerError> {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("cmd") {
+                let command = rest.trim_start();
+                if !command.is_empty() {
+                    self.send_string_cmd(command)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_filesystem(&mut self, data: &qw_common::ServerData) -> Result<(), RunnerError> {
+        if !self.client.fs.is_empty() {
+            if let Some(current) = self.fs_game_dir.as_deref() {
+                if current == data.game_dir {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+
+        let base_dir = match &self.data_dir {
+            Some(path) => path.clone(),
+            None => {
+                let path = locate_data_dir()?;
+                self.data_dir = Some(path.clone());
+                path
+            }
+        };
+
+        let id1 = find_id1_dir(&base_dir)
+            .ok_or_else(|| RunnerError::MissingGameDir("id1".to_string()))?;
+
+        let mut fs = QuakeFs::new();
+        fs.add_game_dir(&id1)?;
+
+        if data.game_dir != "id1" {
+            let mod_dir = find_game_dir(&base_dir, &data.game_dir)
+                .ok_or_else(|| RunnerError::MissingGameDir(data.game_dir.clone()))?;
+            fs.add_game_dir(&mod_dir)?;
+        }
+
+        self.client.fs = fs;
+        self.fs_game_dir = Some(data.game_dir.clone());
+        Ok(())
+    }
+}
+
+fn map_path(level_name: &str) -> String {
+    let name = level_name.trim();
+    if name.contains('/') || name.contains('\\') {
+        if name.ends_with(".bsp") {
+            name.to_string()
+        } else {
+            format!("{}.bsp", name)
+        }
+    } else if name.ends_with(".bsp") {
+        format!("maps/{}", name)
+    } else {
+        format!("maps/{}.bsp", name)
     }
 }
 
@@ -339,7 +449,7 @@ mod tests {
         let mut server_chan = Netchan::new(27001);
         let payload = server_chan.process_packet(packet, true).unwrap();
 
-        let mut reader = MsgReader::new(payload);
+        let mut reader = MsgReader::new(&payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::Move as u8);
         let _checksum = reader.read_u8().unwrap();
         let _lost = reader.read_u8().unwrap();
@@ -375,7 +485,7 @@ mod tests {
 
         let mut server_chan = Netchan::new(27001);
         let payload = server_chan.process_packet(packet, true).unwrap();
-        let mut reader = MsgReader::new(payload);
+        let mut reader = MsgReader::new(&payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
         assert_eq!(reader.read_string().unwrap(), "prespawn");
     }
@@ -424,18 +534,208 @@ mod tests {
         server.send_to(&packet, client_addr).unwrap();
 
         let mut client_buf = [0u8; 512];
-        let _ = runner.poll_once(&mut client_buf).unwrap();
+        for _ in 0..10 {
+            if runner.poll_once(&mut client_buf).unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
 
         let mut recv_buf = [0u8; 512];
         let (size, _) = server.recv_from(&mut recv_buf).unwrap();
         let mut recv_chan = Netchan::new(27001);
         let payload = recv_chan.process_packet(&recv_buf[..size], true).unwrap();
 
-        let mut reader = MsgReader::new(payload);
+        let mut reader = MsgReader::new(&payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
         assert_eq!(
             reader.read_string().unwrap(),
             format!("soundlist {} 0", data.server_count)
         );
+    }
+
+    #[test]
+    fn builds_prespawn_with_map_checksum() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let dir = temp_dir();
+        let map_bytes = build_test_bsp();
+        let maps_dir = dir.join("maps");
+        std::fs::create_dir_all(&maps_dir).unwrap();
+        std::fs::write(maps_dir.join("test.bsp"), &map_bytes).unwrap();
+        runner.client.fs.add_game_dir(&dir).unwrap();
+
+        let bsp = qw_common::Bsp::from_bytes(map_bytes).unwrap();
+        let (_, checksum2) = bsp.map_checksums().unwrap();
+
+        let data = ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 7,
+            game_dir: "id1".to_string(),
+            player_num: 1,
+            spectator: false,
+            level_name: "test".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        };
+        runner.state.serverdata = Some(data.clone());
+
+        let mut server_chan = Netchan::new(27001);
+        let mut model_buf = SizeBuf::new(256);
+        qw_common::write_svc_message(
+            &mut model_buf,
+            &SvcMessage::ModelList(qw_common::StringListChunk {
+                start: 0,
+                items: Vec::new(),
+                next: 0,
+            }),
+        )
+        .unwrap();
+        let model_packet = server_chan
+            .build_packet(model_buf.as_slice(), false)
+            .unwrap();
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&model_packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 512];
+        for _ in 0..10 {
+            if runner.poll_once(&mut client_buf).unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut recv_chan = Netchan::new(27001);
+        let payload = recv_payload(&server, &mut recv_chan);
+        let mut reader = MsgReader::new(&payload);
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(
+            reader.read_string().unwrap(),
+            format!("prespawn {} 0 {}", data.server_count, checksum2)
+        );
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn forwards_cmd_lines_from_stufftext() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let mut buf = SizeBuf::new(128);
+        qw_common::write_svc_message(
+            &mut buf,
+            &SvcMessage::StuffText("cmd spawn 1 0\n".to_string()),
+        )
+        .unwrap();
+        let mut server_chan = Netchan::new(27001);
+        let packet = server_chan.build_packet(buf.as_slice(), false).unwrap();
+
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 256];
+        for _ in 0..10 {
+            if runner.poll_once(&mut client_buf).unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut recv_chan = Netchan::new(27001);
+        let payload = recv_payload(&server, &mut recv_chan);
+        let mut reader = MsgReader::new(&payload);
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(reader.read_string().unwrap(), "spawn 1 0");
+    }
+
+    fn recv_payload(server: &UdpSocket, chan: &mut Netchan) -> Vec<u8> {
+        let mut buf = [0u8; 512];
+        for _ in 0..5 {
+            match server.recv_from(&mut buf) {
+                Ok((size, _)) => {
+                    let payload = chan.process_packet(&buf[..size], true).unwrap();
+                    if !payload.is_empty() {
+                        return payload.to_vec();
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(err) => panic!("recv error: {:?}", err),
+            }
+        }
+        panic!("no payload received");
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("rustquake-test-{}-{}", std::process::id(), nanos));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn build_test_bsp() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&qw_common::BSP_VERSION.to_le_bytes());
+
+        let header_size = 4 + qw_common::HEADER_LUMPS * 8;
+        let mut offsets = Vec::with_capacity(qw_common::HEADER_LUMPS);
+        let mut payloads = Vec::with_capacity(qw_common::HEADER_LUMPS);
+        let mut cursor = header_size;
+
+        for i in 0..qw_common::HEADER_LUMPS {
+            let payload = vec![i as u8; 4];
+            offsets.push((cursor as u32, payload.len() as u32));
+            cursor += payload.len();
+            payloads.push(payload);
+        }
+
+        for (offset, length) in &offsets {
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&length.to_le_bytes());
+        }
+
+        for payload in payloads {
+            data.extend_from_slice(&payload);
+        }
+
+        data
     }
 }

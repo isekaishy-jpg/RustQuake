@@ -52,6 +52,7 @@ pub struct ClientState {
     pub baselines: Vec<EntityState>,
     pub frames: Vec<Frame>,
     pub valid_sequence: i32,
+    pub paused: bool,
 }
 
 impl ClientState {
@@ -77,6 +78,7 @@ impl ClientState {
             baselines,
             frames,
             valid_sequence: 0,
+            paused: false,
         }
     }
 
@@ -151,6 +153,9 @@ impl ClientState {
             SvcMessage::SetAngle(angles) => {
                 self.view_angles = *angles;
             }
+            SvcMessage::SetPause(paused) => {
+                self.paused = *paused;
+            }
             SvcMessage::LightStyle { style, value } => {
                 let index = *style as usize;
                 if index < self.lightstyles.len() {
@@ -174,6 +179,16 @@ impl ClientState {
             }
             SvcMessage::FoundSecret => {
                 self.stats[STAT_SECRETS] += 1;
+            }
+            SvcMessage::MaxSpeed(value) => {
+                if let Some(data) = &mut self.serverdata {
+                    data.movevars.maxspeed = *value;
+                }
+            }
+            SvcMessage::EntGravity(value) => {
+                if let Some(data) = &mut self.serverdata {
+                    data.movevars.entgravity = *value;
+                }
             }
             SvcMessage::SpawnBaseline { entity, baseline } => {
                 let index = *entity as usize;
@@ -676,6 +691,7 @@ mod tests {
         );
         state.apply_message(&SvcMessage::KilledMonster, 0);
         state.apply_message(&SvcMessage::FoundSecret, 0);
+        state.apply_message(&SvcMessage::SetPause(true), 0);
 
         assert_eq!(state.view_entity, Some(12));
         assert_eq!(state.view_angles, Vec3::new(1.0, 2.0, 3.0));
@@ -684,6 +700,39 @@ mod tests {
         assert_eq!(state.stats[5], 1024);
         assert_eq!(state.stats[STAT_MONSTERS], 1);
         assert_eq!(state.stats[STAT_SECRETS], 1);
+        assert!(state.paused);
+    }
+
+    #[test]
+    fn applies_movevar_updates() {
+        let mut state = ClientState::new();
+        let data = qw_common::ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 1,
+            game_dir: "id1".to_string(),
+            player_num: 0,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        };
+        state.apply_message(&SvcMessage::ServerData(data), 0);
+        state.apply_message(&SvcMessage::MaxSpeed(450.0), 0);
+        state.apply_message(&SvcMessage::EntGravity(0.8), 0);
+
+        let data = state.serverdata.unwrap();
+        assert_eq!(data.movevars.maxspeed, 450.0);
+        assert_eq!(data.movevars.entgravity, 0.8);
     }
 
     #[test]

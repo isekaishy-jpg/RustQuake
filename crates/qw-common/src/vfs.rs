@@ -43,6 +43,10 @@ impl QuakeFs {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.search_paths.is_empty()
+    }
+
     pub fn add_game_dir(&mut self, dir: impl AsRef<Path>) -> Result<(), FsError> {
         let dir = dir.as_ref().to_path_buf();
         if !dir.is_dir() {

@@ -198,6 +198,21 @@ pub const SND_ATTENUATION: u16 = 1 << 14;
 pub const DEFAULT_SOUND_PACKET_VOLUME: u8 = 255;
 pub const DEFAULT_SOUND_PACKET_ATTENUATION: f32 = 1.0;
 
+pub const TE_SPIKE: u8 = 0;
+pub const TE_SUPERSPIKE: u8 = 1;
+pub const TE_GUNSHOT: u8 = 2;
+pub const TE_EXPLOSION: u8 = 3;
+pub const TE_TAREXPLOSION: u8 = 4;
+pub const TE_LIGHTNING1: u8 = 5;
+pub const TE_LIGHTNING2: u8 = 6;
+pub const TE_WIZSPIKE: u8 = 7;
+pub const TE_KNIGHTSPIKE: u8 = 8;
+pub const TE_LIGHTNING3: u8 = 9;
+pub const TE_LAVASPLASH: u8 = 10;
+pub const TE_TELEPORT: u8 = 11;
+pub const TE_BLOOD: u8 = 12;
+pub const TE_LIGHTNINGBLOOD: u8 = 13;
+
 pub const MAX_CLIENTS: usize = 32;
 pub const UPDATE_BACKUP: usize = 64;
 pub const UPDATE_MASK: usize = UPDATE_BACKUP - 1;
