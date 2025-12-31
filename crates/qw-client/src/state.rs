@@ -1,10 +1,11 @@
+use crate::prediction::PlayerMove;
 use qw_common::{
     BspCollision, ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS,
     MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
-    NailProjectile, PacketEntities, PacketEntitiesUpdate, STAT_ACTIVEWEAPON, STAT_AMMO, STAT_ARMOR,
-    STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS, STAT_ROCKETS, STAT_SECRETS,
-    STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK,
-    UserCmd, Vec3,
+    NailProjectile, PacketEntities, PacketEntitiesUpdate, PlayerState, STAT_ACTIVEWEAPON,
+    STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS,
+    STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk, SvcMessage,
+    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -482,6 +483,51 @@ impl ClientState {
             }
             _ => {}
         }
+    }
+
+    pub fn predict_usercmd(
+        &self,
+        from: &PlayerState,
+        cmd: UserCmd,
+        spectator: bool,
+    ) -> Option<PlayerState> {
+        if cmd.msec > 50 {
+            let mut split = cmd;
+            split.msec /= 2;
+            let mid = self.predict_usercmd(from, split, spectator)?;
+            return self.predict_usercmd(&mid, split, spectator);
+        }
+        self.predict_usercmd_internal(from, cmd, spectator)
+    }
+
+    fn predict_usercmd_internal(
+        &self,
+        from: &PlayerState,
+        cmd: UserCmd,
+        spectator: bool,
+    ) -> Option<PlayerState> {
+        let collision = self.collision.as_ref()?;
+        let movevars = self.serverdata.as_ref()?.movevars;
+        let mut pmove = PlayerMove::new(cmd);
+        pmove.origin = from.origin;
+        pmove.angles = cmd.angles;
+        pmove.velocity = from.velocity;
+        pmove.oldbuttons = from.oldbuttons;
+        pmove.waterjumptime = from.waterjumptime;
+        pmove.dead = self.stats[STAT_HEALTH] <= 0;
+        pmove.spectator = spectator;
+        pmove.add_world(0);
+        pmove.simulate(collision, movevars);
+
+        let mut out = *from;
+        out.command = cmd;
+        out.waterjumptime = pmove.waterjumptime;
+        out.oldbuttons = pmove.cmd.buttons as i32;
+        out.origin = pmove.origin;
+        out.viewangles = pmove.angles;
+        out.velocity = pmove.velocity;
+        out.onground = pmove.onground;
+        Some(out)
     }
 
     pub fn clear_frame_events(&mut self) {
@@ -1405,5 +1451,52 @@ mod tests {
         let frame = &state.frames[130 & UPDATE_MASK];
         assert_eq!(frame.packet_entities.num_entities, 1);
         assert_eq!(frame.packet_entities.entities[0].number, 7);
+    }
+
+    #[test]
+    fn predict_usercmd_requires_collision_and_serverdata() {
+        let state = ClientState::new();
+        let from = PlayerState::default();
+        let cmd = UserCmd::default();
+        assert!(state.predict_usercmd(&from, cmd, false).is_none());
+    }
+
+    #[test]
+    fn predict_usercmd_updates_buttons() {
+        let mut state = ClientState::new();
+        state.serverdata = Some(qw_common::ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 1,
+            game_dir: "id1".to_string(),
+            player_num: 0,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        });
+        state.collision = Some(BspCollision {
+            planes: Vec::new(),
+            clipnodes: Vec::new(),
+            hull0_clipnodes: Vec::new(),
+            models: Vec::new(),
+        });
+
+        let from = PlayerState::default();
+        let mut cmd = UserCmd::default();
+        cmd.msec = 20;
+        cmd.buttons = 7;
+        let predicted = state.predict_usercmd(&from, cmd, false).unwrap();
+        assert_eq!(predicted.oldbuttons, 7);
+        assert_eq!(predicted.command, cmd);
     }
 }
