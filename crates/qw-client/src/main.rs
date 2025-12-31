@@ -17,7 +17,7 @@ use crate::config::ClientConfig;
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
-use qw_common::UserCmd;
+use qw_common::{InfoError, InfoString, UserCmd};
 
 const MOVE_INTERVAL_MS: u64 = 50;
 
@@ -51,18 +51,18 @@ fn run() -> Result<(), AppError> {
         }
     }
 
-    let mut config = ClientConfig::default();
+    let mut userinfo = ClientConfig::default().userinfo;
     if let Some(name) = args.name.as_deref() {
-        config.userinfo.set("name", name)?;
+        userinfo.set("name", name)?;
     }
     if let Some(topcolor) = args.topcolor.as_deref() {
-        config.userinfo.set("topcolor", topcolor)?;
+        userinfo.set("topcolor", topcolor)?;
     }
     if let Some(bottomcolor) = args.bottomcolor.as_deref() {
-        config.userinfo.set("bottomcolor", bottomcolor)?;
+        userinfo.set("bottomcolor", bottomcolor)?;
     }
     if let Some(rate) = args.rate.as_deref() {
-        config.userinfo.set("rate", rate)?;
+        userinfo.set("rate", rate)?;
     }
 
     let server_addr = std::net::SocketAddr::from(args.server.to_socket_addr());
@@ -72,7 +72,7 @@ fn run() -> Result<(), AppError> {
     } else {
         args.qport
     };
-    let session = Session::new(qport, config.userinfo.as_str().to_string());
+    let session = Session::new(qport, userinfo.as_str().to_string());
     let mut runner = ClientRunner::new(net, session);
     runner.start_connect()?;
 
@@ -147,10 +147,24 @@ fn run() -> Result<(), AppError> {
             if cmd.eq_ignore_ascii_case("quit") || cmd.eq_ignore_ascii_case("exit") {
                 return Ok(());
             }
-            if runner.session.state == SessionState::Connected {
-                runner.send_string_cmd(&cmd)?;
-            } else {
-                pending_cmds.push_back(cmd);
+            match maybe_userinfo_command(&cmd, &mut userinfo) {
+                Ok(Some(mapped)) => {
+                    if runner.session.state == SessionState::Connected {
+                        runner.send_string_cmd(&mapped)?;
+                    } else {
+                        pending_cmds.push_back(mapped);
+                    }
+                }
+                Ok(None) => {
+                    if runner.session.state == SessionState::Connected {
+                        runner.send_string_cmd(&cmd)?;
+                    } else {
+                        pending_cmds.push_back(cmd);
+                    }
+                }
+                Err(err) => {
+                    println!("[client] invalid userinfo: {err}");
+                }
             }
         }
 
@@ -200,5 +214,47 @@ impl From<qw_common::InfoError> for AppError {
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         AppError::Io(err)
+    }
+}
+
+fn maybe_userinfo_command(
+    input: &str,
+    userinfo: &mut InfoString,
+) -> Result<Option<String>, InfoError> {
+    let mut parts = input.splitn(2, ' ');
+    let command = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    if rest.is_empty() {
+        return Ok(None);
+    }
+
+    let (key, value) = match command {
+        "name" | "skin" | "team" | "topcolor" | "bottomcolor" | "rate" | "msg" => (command, rest),
+        "setinfo" => {
+            let mut inner = rest.splitn(2, ' ');
+            let key = inner.next().unwrap_or("").trim();
+            let value = inner.next().unwrap_or("").trim();
+            if key.is_empty() || value.is_empty() {
+                return Ok(None);
+            }
+            if key.starts_with('*') {
+                userinfo.set_star(key, value)?;
+            } else {
+                userinfo.set(key, value)?;
+            }
+            return Ok(Some(format!("setinfo {} {}", key, quote_if_needed(value))));
+        }
+        _ => return Ok(None),
+    };
+
+    userinfo.set(key, value)?;
+    Ok(Some(format!("setinfo {} {}", key, quote_if_needed(value))))
+}
+
+fn quote_if_needed(value: &str) -> String {
+    if value.contains(' ') {
+        format!("\"{}\"", value)
+    } else {
+        value.to_string()
     }
 }
