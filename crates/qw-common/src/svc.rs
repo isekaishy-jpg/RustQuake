@@ -843,6 +843,42 @@ mod tests {
     }
 
     #[test]
+    fn caps_packetentities_count() {
+        let mut entities = Vec::new();
+        for i in 0..(crate::protocol::MAX_PACKET_ENTITIES + 4) {
+            entities.push(EntityDelta {
+                number: (i + 1) as u16,
+                remove: false,
+                flags: 0,
+                model_index: None,
+                frame: None,
+                colormap: None,
+                skin_num: None,
+                effects: None,
+                origin: [None, None, None],
+                angles: [None, None, None],
+                solid: false,
+            });
+        }
+        let update = PacketEntitiesUpdate {
+            delta_from: None,
+            entities,
+        };
+
+        let mut buf = SizeBuf::new(4096);
+        write_svc_message(&mut buf, &SvcMessage::PacketEntities(update)).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        match msg {
+            SvcMessage::PacketEntities(update) => {
+                assert_eq!(update.entities.len(), crate::protocol::MAX_PACKET_ENTITIES);
+            }
+            _ => panic!("expected packetentities"),
+        }
+    }
+
+    #[test]
     fn parses_setinfo() {
         let mut buf = SizeBuf::new(128);
         buf.write_u8(Svc::SetInfo as u8).unwrap();

@@ -66,6 +66,14 @@ impl SizeBuf {
         &self.data
     }
 
+    pub fn set_u8(&mut self, index: usize, value: u8) -> Result<(), SizeBufError> {
+        if index >= self.data.len() {
+            return Err(SizeBufError::Overflow);
+        }
+        self.data[index] = value;
+        Ok(())
+    }
+
     fn get_space(&mut self, length: usize) -> Result<usize, SizeBufError> {
         if self.data.len() + length > self.maxsize {
             if !self.allow_overflow {
