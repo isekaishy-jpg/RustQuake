@@ -1,0 +1,6 @@
+# Local data paths (do not commit actual game files).
+#
+# Copy this file to config/data_paths.toml and edit the path.
+# You can also set RUSTQUAKE_DATA_DIR in the environment to override.
+
+quake_dir = "C:/Program Files (x86)/Steam/steamapps/common/Quake"
