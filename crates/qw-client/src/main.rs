@@ -258,3 +258,37 @@ fn quote_if_needed(value: &str) -> String {
         value.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_name_command_to_setinfo() {
+        let mut info = InfoString::new(128);
+        let cmd = maybe_userinfo_command("name player", &mut info)
+            .unwrap()
+            .expect("expected setinfo");
+        assert_eq!(cmd, "setinfo name player");
+        assert!(info.as_str().contains("\\name\\player"));
+    }
+
+    #[test]
+    fn quotes_values_with_spaces() {
+        let mut info = InfoString::new(128);
+        let cmd = maybe_userinfo_command("name player one", &mut info)
+            .unwrap()
+            .expect("expected setinfo");
+        assert_eq!(cmd, "setinfo name \"player one\"");
+    }
+
+    #[test]
+    fn preserves_star_keys_for_setinfo() {
+        let mut info = InfoString::new(128);
+        let cmd = maybe_userinfo_command("setinfo *ver rq28", &mut info)
+            .unwrap()
+            .expect("expected setinfo");
+        assert_eq!(cmd, "setinfo *ver rq28");
+        assert!(info.as_str().contains("\\*ver\\rq28"));
+    }
+}
