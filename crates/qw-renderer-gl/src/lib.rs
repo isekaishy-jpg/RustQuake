@@ -1,4 +1,4 @@
-use qw_common::{BspRender, Palette, Vec3};
+use qw_common::{BspRender, FaceVertex, Palette, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -43,6 +43,7 @@ pub struct RenderSurface {
     pub indices: Vec<u32>,
     pub texture_index: Option<usize>,
     pub texture_name: Option<String>,
+    pub lightmap: Option<RenderLightmap>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +52,14 @@ pub struct RenderTexture {
     pub width: u32,
     pub height: u32,
     pub mips: [Vec<u8>; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderLightmap {
+    pub width: u32,
+    pub height: u32,
+    pub styles: Vec<u8>,
+    pub samples: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +155,7 @@ fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderS
             _ => continue,
         };
         let tex_scale = texture_scale_for_face(bsp, face);
+        let lightmap = build_lightmap(bsp, face, &verts);
         let vertices = verts
             .into_iter()
             .map(|vertex| RenderVertex {
@@ -166,6 +176,7 @@ fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderS
             indices,
             texture_index,
             texture_name,
+            lightmap,
         });
     }
     surfaces
@@ -260,6 +271,91 @@ fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f3
         return None;
     }
     Some((texture.width as f32, texture.height as f32))
+}
+
+fn build_lightmap(
+    bsp: &BspRender,
+    face: &qw_common::Face,
+    verts: &[FaceVertex],
+) -> Option<RenderLightmap> {
+    if face.light_ofs < 0 {
+        return None;
+    }
+    if bsp.lighting.is_empty() {
+        return None;
+    }
+
+    let (width, height) = lightmap_dimensions(verts)?;
+    let size = (width * height) as usize;
+    if size == 0 {
+        return None;
+    }
+
+    let styles: Vec<u8> = face
+        .styles
+        .iter()
+        .copied()
+        .filter(|style| *style != 255)
+        .collect();
+    if styles.is_empty() {
+        return None;
+    }
+
+    let offset = face.light_ofs as usize;
+    let total = size
+        .checked_mul(styles.len())
+        .and_then(|count| offset.checked_add(count))?;
+    if total > bsp.lighting.len() {
+        return None;
+    }
+
+    let mut samples = Vec::with_capacity(styles.len());
+    for idx in 0..styles.len() {
+        let start = offset + idx * size;
+        let end = start + size;
+        samples.push(bsp.lighting[start..end].to_vec());
+    }
+
+    Some(RenderLightmap {
+        width,
+        height,
+        styles,
+        samples,
+    })
+}
+
+fn lightmap_dimensions(verts: &[FaceVertex]) -> Option<(u32, u32)> {
+    let first = verts.first()?;
+    let mut min_s = first.tex_coords[0];
+    let mut max_s = first.tex_coords[0];
+    let mut min_t = first.tex_coords[1];
+    let mut max_t = first.tex_coords[1];
+
+    for vert in verts.iter().skip(1) {
+        min_s = min_s.min(vert.tex_coords[0]);
+        max_s = max_s.max(vert.tex_coords[0]);
+        min_t = min_t.min(vert.tex_coords[1]);
+        max_t = max_t.max(vert.tex_coords[1]);
+    }
+
+    let min_s = (min_s / 16.0).floor() * 16.0;
+    let max_s = (max_s / 16.0).ceil() * 16.0;
+    let min_t = (min_t / 16.0).floor() * 16.0;
+    let max_t = (max_t / 16.0).ceil() * 16.0;
+
+    let extent_s = max_s - min_s;
+    let extent_t = max_t - min_t;
+    if extent_s < 0.0 || extent_t < 0.0 {
+        return None;
+    }
+
+    let width = (extent_s / 16.0).round() as i32 + 1;
+    let height = (extent_t / 16.0).round() as i32 + 1;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+
+    Some((width as u32, height as u32))
 }
 
 #[cfg(test)]
@@ -359,6 +455,7 @@ mod tests {
         assert_eq!(world.surfaces[0].texture_index, None);
         assert_eq!(world.surfaces[0].vertices[1].tex_coords, [1.0 / 64.0, 0.0]);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
+        assert!(world.surfaces[0].lightmap.is_none());
     }
 
     #[test]
@@ -413,6 +510,56 @@ mod tests {
         let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
         assert_eq!(world.textures.len(), 1);
         assert_eq!(world.surfaces[0].texture_index, Some(0));
+    }
+
+    #[test]
+    fn builds_lightmap_from_face() {
+        let mut lighting = Vec::new();
+        lighting.extend_from_slice(&[1u8; 9]);
+
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(32.0, 0.0, 0.0),
+                Vec3::new(32.0, 32.0, 0.0),
+                Vec3::new(0.0, 32.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![qw_common::TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![qw_common::Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0, 255, 255, 255],
+                light_ofs: 0,
+            }],
+            textures: vec![qw_common::BspTexture {
+                name: "wall".to_string(),
+                width: 32,
+                height: 32,
+                offsets: [0; 4],
+                mip_data: None,
+            }],
+            lighting,
+        };
+
+        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
+        let lightmap = world.surfaces[0].lightmap.as_ref().unwrap();
+        assert_eq!(lightmap.width, 3);
+        assert_eq!(lightmap.height, 3);
+        assert_eq!(lightmap.styles, vec![0]);
+        assert_eq!(lightmap.samples[0].len(), 9);
+        assert_eq!(lightmap.samples[0][0], 1);
     }
 
     #[test]
