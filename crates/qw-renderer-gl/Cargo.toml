@@ -5,3 +5,4 @@ edition = "2024"
 license = "GPL-2.0-only"
 
 [dependencies]
+qw-common = { path = "../qw-common" }

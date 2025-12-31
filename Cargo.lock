@@ -23,6 +23,9 @@ version = "0.1.0"
 [[package]]
 name = "qw-renderer-gl"
 version = "0.1.0"
+dependencies = [
+ "qw-common",
+]
 
 [[package]]
 name = "qw-server"

@@ -21,9 +21,10 @@ use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
 use crate::sound::SoundManager;
+use crate::state::ClientState;
 use qw_audio::{AudioConfig, AudioSystem};
 use qw_common::{InfoError, InfoString};
-use qw_renderer_gl::{GlRenderer, Renderer, RendererConfig};
+use qw_renderer_gl::{GlRenderer, RenderView, Renderer, RendererConfig};
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
@@ -209,6 +210,7 @@ fn run() -> Result<(), AppError> {
         }
 
         if audio.is_running() {
+            renderer.set_view(build_render_view(&runner.state));
             renderer.begin_frame();
             renderer.end_frame();
         }
@@ -352,6 +354,25 @@ fn update_window_title(
     }
 }
 
+fn build_render_view(state: &ClientState) -> RenderView {
+    let (mut origin, angles) = match state.intermission {
+        Some((origin, angles)) => (origin, angles),
+        None => (state.sim_origin, state.sim_angles),
+    };
+
+    if state.intermission.is_none()
+        && let Some(data) = &state.client_data
+    {
+        origin.z += f32::from(data.view_height);
+    }
+
+    RenderView {
+        origin,
+        angles,
+        fov_y: 90.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +457,48 @@ mod tests {
         update_window_title(&mut window, &info, &mut last_title);
         assert_eq!(window.config().title, "RustQuake - Unit");
         assert_eq!(last_title.as_deref(), Some("Unit"));
+    }
+
+    #[test]
+    fn render_view_applies_view_height() {
+        let mut state = ClientState::new();
+        state.sim_origin = qw_common::Vec3::new(1.0, 2.0, 3.0);
+        state.sim_angles = qw_common::Vec3::new(0.0, 90.0, 0.0);
+        state.client_data = Some(qw_common::ClientDataMessage {
+            bits: 0,
+            view_height: 22,
+            ideal_pitch: 0,
+            punch_angle: qw_common::Vec3::default(),
+            velocity: qw_common::Vec3::default(),
+            items: 0,
+            onground: true,
+            inwater: false,
+            weapon_frame: 0,
+            armor: 0,
+            weapon: 0,
+            health: 100,
+            ammo: 0,
+            ammo_counts: [0; 4],
+            active_weapon: 0,
+        });
+
+        let view = build_render_view(&state);
+        assert_eq!(view.origin, qw_common::Vec3::new(1.0, 2.0, 25.0));
+        assert_eq!(view.angles, qw_common::Vec3::new(0.0, 90.0, 0.0));
+    }
+
+    #[test]
+    fn render_view_uses_intermission() {
+        let mut state = ClientState::new();
+        state.intermission = Some((
+            qw_common::Vec3::new(10.0, 20.0, 30.0),
+            qw_common::Vec3::new(1.0, 2.0, 3.0),
+        ));
+        state.sim_origin = qw_common::Vec3::new(0.0, 0.0, 0.0);
+        state.sim_angles = qw_common::Vec3::new(0.0, 0.0, 0.0);
+
+        let view = build_render_view(&state);
+        assert_eq!(view.origin, qw_common::Vec3::new(10.0, 20.0, 30.0));
+        assert_eq!(view.angles, qw_common::Vec3::new(1.0, 2.0, 3.0));
     }
 }
