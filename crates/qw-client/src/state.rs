@@ -2,7 +2,7 @@ use crate::prediction::{PhysEnt, PlayerMove};
 use qw_common::{
     BspCollision, ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS,
     MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
-    NailProjectile, PacketEntities, PacketEntitiesUpdate, PlayerState, STAT_ACTIVEWEAPON,
+    NailProjectile, PF_DEAD, PacketEntities, PacketEntitiesUpdate, PlayerState, STAT_ACTIVEWEAPON,
     STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS,
     STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk, SvcMessage,
     UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
@@ -575,7 +575,8 @@ impl ClientState {
         let player_num = data.player_num as usize;
         let spectator = data.spectator;
         let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
-        let physents = self.build_physents(&self.frames[frame_index], player_num);
+        let physents =
+            self.build_physents(&self.frames[frame_index], incoming_sequence, player_num);
         let mut from_seq = incoming_sequence;
         let mut from_state = self.frames[frame_index].playerstate[player_num];
         let mut to_state = None;
@@ -650,7 +651,12 @@ impl ClientState {
         self.sim_angles = from_state.viewangles;
     }
 
-    fn build_physents(&self, frame: &Frame, player_num: usize) -> Vec<PhysEnt> {
+    fn build_physents(
+        &self,
+        frame: &Frame,
+        incoming_sequence: u32,
+        player_num: usize,
+    ) -> Vec<PhysEnt> {
         let mut physents = Vec::new();
         physents.push(PhysEnt {
             origin: Vec3::default(),
@@ -663,8 +669,12 @@ impl ClientState {
         let player_mins = Vec3::new(-16.0, -16.0, -24.0);
         let player_maxs = Vec3::new(16.0, 16.0, 32.0);
 
+        let sequence = incoming_sequence as i32;
         for (index, state) in frame.playerstate.iter().enumerate() {
-            if index == player_num || state.messagenum == 0 {
+            if index == player_num || state.messagenum != sequence || state.modelindex == 0 {
+                continue;
+            }
+            if (state.flags as u32 & PF_DEAD) != 0 {
                 continue;
             }
             physents.push(PhysEnt {
