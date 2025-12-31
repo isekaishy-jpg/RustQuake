@@ -168,7 +168,16 @@ fn run() -> Result<(), AppError> {
             }
         }
         update_render_world(&mut renderer, &runner.state, &mut last_world);
-        sound_manager.handle_events(&mut audio, &mut runner.state);
+        let (_, right, _) = angle_vectors(runner.state.sim_angles);
+        audio.set_listener(
+            [
+                runner.state.sim_origin.x,
+                runner.state.sim_origin.y,
+                runner.state.sim_origin.z,
+            ],
+            [right.x, right.y, right.z],
+        );
+        sound_manager.handle_events(&mut audio, &mut runner.state, &runner.client.fs);
         update_window_title(&mut window, &runner.state.serverinfo, &mut last_title);
 
         if runner.session.state == SessionState::Connected {
@@ -452,6 +461,22 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
     } else {
         RenderEntityKind::Alias
     }
+}
+
+fn angle_vectors(angles: qw_common::Vec3) -> (qw_common::Vec3, qw_common::Vec3, qw_common::Vec3) {
+    let (pitch, yaw, roll) = (
+        angles.x.to_radians(),
+        angles.y.to_radians(),
+        angles.z.to_radians(),
+    );
+    let (sp, cp) = pitch.sin_cos();
+    let (sy, cy) = yaw.sin_cos();
+    let (sr, cr) = roll.sin_cos();
+
+    let forward = qw_common::Vec3::new(cp * cy, cp * sy, -sp);
+    let right = qw_common::Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
+    let up = qw_common::Vec3::new(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp);
+    (forward, right, up)
 }
 
 #[cfg(test)]
