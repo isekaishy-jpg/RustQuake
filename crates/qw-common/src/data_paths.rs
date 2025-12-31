@@ -95,6 +95,13 @@ fn default_quake_paths() -> Vec<PathBuf> {
         if let Ok(pf) = env::var("ProgramFiles") {
             paths.push(PathBuf::from(pf).join("Steam\\steamapps\\common\\Quake"));
         }
+    } else if cfg!(unix)
+        && let Ok(home) = env::var("HOME")
+    {
+        let home = PathBuf::from(home);
+        paths.push(home.join(".steam/steam/steamapps/common/Quake"));
+        paths.push(home.join(".steam/root/steamapps/common/Quake"));
+        paths.push(home.join(".local/share/Steam/steamapps/common/Quake"));
     }
     paths
 }
