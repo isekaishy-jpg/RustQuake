@@ -229,12 +229,18 @@ impl ClientRunner {
                     self.download_queue.clear();
                     self.queue_missing_models()?;
                     if self.start_next_download()? {
-                        self.signon_phase = SignonPhase::Prespawn;
+                        self.signon_phase = SignonPhase::Skins;
                     } else {
-                        let checksum2 = self.map_checksum2(&data)?;
-                        let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
-                        self.signon_phase = SignonPhase::Done;
-                        self.send_string_cmd(&cmd)?;
+                        self.download_queue.clear();
+                        self.queue_missing_skins()?;
+                        if self.start_next_download()? {
+                            self.signon_phase = SignonPhase::Prespawn;
+                        } else {
+                            let checksum2 = self.map_checksum2(&data)?;
+                            let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
+                            self.signon_phase = SignonPhase::Done;
+                            self.send_string_cmd(&cmd)?;
+                        }
                     }
                 }
             }
@@ -340,6 +346,27 @@ impl ClientRunner {
         Ok(())
     }
 
+    fn queue_missing_skins(&mut self) -> Result<(), RunnerError> {
+        for player in &self.state.players {
+            let Some(skin) = qw_common::value_for_key(player.userinfo.as_str(), "skin") else {
+                continue;
+            };
+            let trimmed = skin.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let base = qw_common::strip_extension(trimmed);
+            if base.is_empty() {
+                continue;
+            }
+            let path = format!("skins/{}.pcx", base);
+            if !self.client.fs.contains(&path) {
+                self.download_queue.push_back(path);
+            }
+        }
+        Ok(())
+    }
+
     fn start_next_download(&mut self) -> Result<bool, RunnerError> {
         if self.download.is_some() {
             return Ok(true);
@@ -435,6 +462,18 @@ impl ClientRunner {
                 let cmd = format!("modellist {} 0", data.server_count);
                 self.send_string_cmd(&cmd)?;
             }
+            SignonPhase::Skins => {
+                self.download_queue.clear();
+                self.queue_missing_skins()?;
+                if self.start_next_download()? {
+                    self.signon_phase = SignonPhase::Prespawn;
+                    return Ok(());
+                }
+                let checksum2 = self.map_checksum2(&data)?;
+                let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
+                self.signon_phase = SignonPhase::Done;
+                self.send_string_cmd(&cmd)?;
+            }
             SignonPhase::Prespawn => {
                 let checksum2 = self.map_checksum2(&data)?;
                 let cmd = format!("prespawn {} 0 {}", data.server_count, checksum2);
@@ -486,6 +525,7 @@ enum SignonPhase {
     Idle,
     SoundList,
     ModelList,
+    Skins,
     Prespawn,
     Done,
 }
@@ -1030,6 +1070,104 @@ mod tests {
         let mut reader = MsgReader::new(&payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
         assert_eq!(reader.read_string().unwrap(), "download sound/misc/foo.wav");
+
+        if let Some(value) = old_download {
+            unsafe {
+                std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("RUSTQUAKE_DOWNLOAD_DIR");
+            }
+        }
+        std::fs::remove_dir_all(download_dir).ok();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn requests_download_for_missing_skin() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let download_dir = temp_dir();
+        let old_download = std::env::var("RUSTQUAKE_DOWNLOAD_DIR").ok();
+        // Safety: env var mutation is process-global; guard with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", &download_dir);
+        }
+
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        runner.client.fs.add_game_dir(&dir).unwrap();
+
+        runner.state.serverdata = Some(ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 9,
+            game_dir: "id1".to_string(),
+            player_num: 1,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        });
+        runner
+            .state
+            .players
+            .get_mut(0)
+            .unwrap()
+            .userinfo
+            .set("skin", "base")
+            .unwrap();
+
+        let mut buf = SizeBuf::new(256);
+        qw_common::write_svc_message(
+            &mut buf,
+            &SvcMessage::ModelList(qw_common::StringListChunk {
+                start: 0,
+                items: Vec::new(),
+                next: 0,
+            }),
+        )
+        .unwrap();
+        let mut server_chan = Netchan::new(27001);
+        let packet = server_chan.build_packet(buf.as_slice(), false).unwrap();
+
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 512];
+        for _ in 0..10 {
+            if runner.poll_once(&mut client_buf).unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut recv_chan = Netchan::new(27001);
+        let payload = recv_payload(&server, &mut recv_chan);
+        let mut reader = MsgReader::new(&payload);
+        assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
+        assert_eq!(reader.read_string().unwrap(), "download skins/base.pcx");
 
         if let Some(value) = old_download {
             unsafe {
