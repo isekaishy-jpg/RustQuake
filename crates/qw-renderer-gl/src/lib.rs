@@ -144,11 +144,16 @@ fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
             Some(verts) if verts.len() >= 3 => verts,
             _ => continue,
         };
+        let tex_scale = texture_scale_for_face(bsp, face);
         let vertices = verts
             .into_iter()
             .map(|vertex| RenderVertex {
                 position: vertex.position,
-                tex_coords: vertex.tex_coords,
+                tex_coords: if let Some((width, height)) = tex_scale {
+                    [vertex.tex_coords[0] / width, vertex.tex_coords[1] / height]
+                } else {
+                    vertex.tex_coords
+                },
             })
             .collect::<Vec<_>>();
 
@@ -222,6 +227,18 @@ fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<Stri
     } else {
         Some(texture.name.clone())
     }
+}
+
+fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f32, f32)> {
+    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
+    if texinfo.texture_id < 0 {
+        return None;
+    }
+    let texture = bsp.textures.get(texinfo.texture_id as usize)?;
+    if texture.width == 0 || texture.height == 0 {
+        return None;
+    }
+    Some((texture.width as f32, texture.height as f32))
 }
 
 #[cfg(test)]
@@ -318,6 +335,7 @@ mod tests {
         assert_eq!(world.surfaces.len(), 1);
         assert_eq!(world.surfaces[0].vertices.len(), 4);
         assert_eq!(world.surfaces[0].indices, vec![0, 1, 2, 0, 2, 3]);
+        assert_eq!(world.surfaces[0].vertices[1].tex_coords, [1.0 / 64.0, 0.0]);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
     }
 
