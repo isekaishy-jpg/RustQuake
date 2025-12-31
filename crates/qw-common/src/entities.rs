@@ -1,6 +1,7 @@
 // Quake entity text parsing.
 
 use crate::com_parse::com_parse;
+use std::path::Path;
 
 #[derive(Debug)]
 pub enum EntityError {
@@ -56,6 +57,36 @@ pub fn parse_entities(text: &str) -> Result<Vec<Entity>, EntityError> {
     Ok(entities)
 }
 
+pub fn worldspawn_wad_list(entities: &[Entity]) -> Vec<String> {
+    let Some(worldspawn) = entities
+        .iter()
+        .find(|entity| entity.get("classname") == Some("worldspawn"))
+    else {
+        return Vec::new();
+    };
+    let Some(wads) = worldspawn.get("wad") else {
+        return Vec::new();
+    };
+
+    wads.split(';')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let name = Path::new(trimmed)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(trimmed);
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +106,13 @@ mod tests {
         let text = "{\n\"classname\" \"worldspawn\"\n";
         let err = parse_entities(text).unwrap_err();
         matches!(err, EntityError::UnexpectedEof);
+    }
+
+    #[test]
+    fn parses_wad_list_from_worldspawn() {
+        let text = "{\n\"classname\" \"worldspawn\"\n\"wad\" \"C:\\\\quake\\\\id1\\\\gfx.wad;foo.wad;\"\n}\n";
+        let entities = parse_entities(text).unwrap();
+        let wads = worldspawn_wad_list(&entities);
+        assert_eq!(wads, vec!["gfx.wad", "foo.wad"]);
     }
 }
