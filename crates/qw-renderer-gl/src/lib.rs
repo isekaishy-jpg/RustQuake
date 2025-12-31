@@ -31,17 +31,32 @@ pub struct RenderView {
     pub fov_y: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderVertex {
+    pub position: Vec3,
+    pub tex_coords: [f32; 2],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderSurface {
+    pub vertices: Vec<RenderVertex>,
+    pub texture_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderWorld {
     pub map_name: String,
     pub bsp: BspRender,
+    pub surfaces: Vec<RenderSurface>,
 }
 
 impl RenderWorld {
-    pub fn new(map_name: impl Into<String>, bsp: BspRender) -> Self {
+    pub fn from_bsp(map_name: impl Into<String>, bsp: BspRender) -> Self {
+        let surfaces = build_surfaces(&bsp);
         Self {
             map_name: map_name.into(),
             bsp,
+            surfaces,
         }
     }
 }
@@ -102,6 +117,44 @@ impl Renderer for GlRenderer {
     }
 }
 
+fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
+    let mut surfaces = Vec::new();
+    for (index, face) in bsp.faces.iter().enumerate() {
+        let verts = match bsp.face_vertices(index) {
+            Some(verts) if verts.len() >= 3 => verts,
+            _ => continue,
+        };
+        let vertices = verts
+            .into_iter()
+            .map(|vertex| RenderVertex {
+                position: vertex.position,
+                tex_coords: vertex.tex_coords,
+            })
+            .collect::<Vec<_>>();
+
+        let texture_name = texture_name_for_face(bsp, face);
+        surfaces.push(RenderSurface {
+            vertices,
+            texture_name,
+        });
+    }
+    surfaces
+}
+
+fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<String> {
+    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
+    if texinfo.texture_id < 0 {
+        return None;
+    }
+    let index = texinfo.texture_id as usize;
+    let texture = bsp.textures.get(index)?;
+    if texture.name.is_empty() {
+        None
+    } else {
+        Some(texture.name.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,7 +191,7 @@ mod tests {
     #[test]
     fn stores_world_state() {
         let mut renderer = GlRenderer::new(RendererConfig::default());
-        let world = RenderWorld::new(
+        let world = RenderWorld::from_bsp(
             "maps/start.bsp",
             BspRender {
                 vertices: Vec::new(),
@@ -152,5 +205,48 @@ mod tests {
         );
         renderer.set_world(world.clone());
         assert_eq!(renderer.world(), Some(&world));
+    }
+
+    #[test]
+    fn builds_surfaces_from_faces() {
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![qw_common::TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![qw_common::Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0; 4],
+                light_ofs: 0,
+            }],
+            textures: vec![qw_common::BspTexture {
+                name: "wall".to_string(),
+                width: 64,
+                height: 64,
+                offsets: [0; 4],
+            }],
+            lighting: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
+        assert_eq!(world.surfaces.len(), 1);
+        assert_eq!(world.surfaces[0].vertices.len(), 4);
+        assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
     }
 }
