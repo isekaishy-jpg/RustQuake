@@ -97,6 +97,7 @@ pub struct ClientState {
     pub sim_velocity: Vec3,
     pub sim_angles: Vec3,
     pub server_version: Option<i32>,
+    pub parsecount_time: Option<f64>,
     pub stats: [i32; MAX_CL_STATS],
     pub lightstyles: Vec<String>,
     pub baselines: Vec<EntityState>,
@@ -152,6 +153,7 @@ impl ClientState {
             sim_velocity: Vec3::default(),
             sim_angles: Vec3::default(),
             server_version: None,
+            parsecount_time: None,
             stats: [0; MAX_CL_STATS],
             lightstyles: vec![String::new(); MAX_LIGHTSTYLES],
             baselines,
@@ -193,6 +195,7 @@ impl ClientState {
                 self.sim_velocity = Vec3::default();
                 self.sim_angles = Vec3::default();
                 self.server_time = 0.0;
+                self.parsecount_time = None;
                 self.paused = false;
                 self.next_sound = None;
                 self.next_model = None;
@@ -320,10 +323,11 @@ impl ClientState {
                     let slot = info.num as usize;
                     if let Some(player_state) = state.playerstate.get_mut(slot) {
                         player_state.messagenum = incoming_sequence as i32;
+                        let base_time = self.parsecount_time.unwrap_or(self.server_time as f64);
                         player_state.state_time = if let Some(msec) = info.msec {
-                            self.server_time as f64 - (msec as f64 * 0.001)
+                            base_time - (msec as f64 * 0.001)
                         } else {
-                            self.server_time as f64
+                            base_time
                         };
                         player_state.flags = info.flags as i32;
                         player_state.origin = info.origin;
@@ -1034,6 +1038,7 @@ mod tests {
     fn applies_playerinfo() {
         let mut state = ClientState::new();
         state.server_time = 5.0;
+        state.parsecount_time = Some(5.0);
         state.apply_message(
             &SvcMessage::PlayerInfo(qw_common::PlayerInfoMessage {
                 num: 0,

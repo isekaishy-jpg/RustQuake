@@ -134,6 +134,7 @@ impl ClientRunner {
             let now = self.start_time.elapsed().as_secs_f64();
             let ack_index = (incoming_ack as usize) & UPDATE_MASK;
             self.state.frames[ack_index].receivedtime = now;
+            self.state.parsecount_time = Some(self.state.frames[ack_index].senttime);
             for message in messages {
                 if let SvcMessage::ChokeCount(count) = message {
                     self.state.mark_choked(*count, incoming_ack);
