@@ -1,6 +1,7 @@
 // Quake entity text parsing.
 
 use crate::com_parse::com_parse;
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -68,6 +69,7 @@ pub fn worldspawn_wad_list(entities: &[Entity]) -> Vec<String> {
         return Vec::new();
     };
 
+    let mut seen = HashSet::new();
     wads.split(';')
         .filter_map(|entry| {
             let trimmed = entry.trim();
@@ -82,16 +84,19 @@ pub fn worldspawn_wad_list(entities: &[Entity]) -> Vec<String> {
             if name.is_empty() {
                 None
             } else {
-                Some(name.to_string())
+                let key = name.to_ascii_lowercase();
+                if seen.insert(key) {
+                    Some(name.to_string())
+                } else {
+                    None
+                }
             }
         })
         .collect()
 }
 
 fn basename_any_sep(path: &str) -> &str {
-    path.rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(path)
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 #[cfg(test)]
@@ -121,5 +126,13 @@ mod tests {
         let entities = parse_entities(text).unwrap();
         let wads = worldspawn_wad_list(&entities);
         assert_eq!(wads, vec!["gfx.wad", "foo.wad"]);
+    }
+
+    #[test]
+    fn dedupes_and_handles_forward_slashes() {
+        let text = "{\n\"classname\" \"worldspawn\"\n\"wad\" \"C:/quake/id1/gfx.wad;gfx.wad;TEXTURES.wad;\"\n}\n";
+        let entities = parse_entities(text).unwrap();
+        let wads = worldspawn_wad_list(&entities);
+        assert_eq!(wads, vec!["gfx.wad", "TEXTURES.wad"]);
     }
 }
