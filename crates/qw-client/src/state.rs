@@ -79,6 +79,9 @@ pub struct ClientState {
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
+    pub player_model_index: Option<u8>,
+    pub spike_model_index: Option<u8>,
+    pub flag_model_index: Option<u8>,
     pub client_data: Option<ClientDataMessage>,
     pub sound_events: Vec<qw_common::SoundMessage>,
     pub stop_sounds: Vec<StopSoundEvent>,
@@ -131,6 +134,9 @@ impl ClientState {
             players,
             sounds: Vec::new(),
             models: Vec::new(),
+            player_model_index: None,
+            spike_model_index: None,
+            flag_model_index: None,
             client_data: None,
             sound_events: Vec::new(),
             stop_sounds: Vec::new(),
@@ -176,6 +182,9 @@ impl ClientState {
                 self.collision_map = None;
                 self.sounds.clear();
                 self.models.clear();
+                self.player_model_index = None;
+                self.spike_model_index = None;
+                self.flag_model_index = None;
                 self.client_data = None;
                 self.server_version = None;
                 self.view_entity = None;
@@ -272,29 +281,39 @@ impl ClientState {
                 }
             }
             SvcMessage::PlayerInfo(info) => {
-                if let Some(player) = self.players.get_mut(info.num as usize) {
-                    player.origin = info.origin;
-                    player.frame = info.frame;
-                    player.velocity = info.velocity;
-                    if let Some(msec) = info.msec {
-                        player.msec = msec;
-                    }
-                    if let Some(cmd) = info.command {
+                let (cmd, model_index, skin_num, effects, weapon_frame) =
+                    if let Some(player) = self.players.get_mut(info.num as usize) {
+                        player.origin = info.origin;
+                        player.frame = info.frame;
+                        player.velocity = info.velocity;
+                        if let Some(msec) = info.msec {
+                            player.msec = msec;
+                        }
+                        let cmd = info.command.unwrap_or(player.cmd);
                         player.cmd = cmd;
-                    }
-                    if let Some(model_index) = info.model_index {
+                        let model_index = info
+                            .model_index
+                            .or(self.player_model_index)
+                            .unwrap_or(player.model_index);
                         player.model_index = model_index;
-                    }
-                    if let Some(skin) = info.skin_num {
-                        player.skin_num = skin;
-                    }
-                    if let Some(effects) = info.effects {
+                        let skin_num = info.skin_num.unwrap_or(0);
+                        player.skin_num = skin_num;
+                        let effects = info.effects.unwrap_or(0);
                         player.effects = effects;
-                    }
-                    if let Some(weapon_frame) = info.weapon_frame {
+                        let weapon_frame = info.weapon_frame.unwrap_or(0);
                         player.weapon_frame = weapon_frame;
-                    }
-                }
+                        (cmd, model_index, skin_num, effects, weapon_frame)
+                    } else {
+                        (
+                            info.command.unwrap_or_default(),
+                            info.model_index
+                                .or(self.player_model_index)
+                                .unwrap_or_default(),
+                            info.skin_num.unwrap_or(0),
+                            info.effects.unwrap_or(0),
+                            info.weapon_frame.unwrap_or(0),
+                        )
+                    };
 
                 let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
                 if let Some(state) = self.frames.get_mut(frame_index) {
@@ -314,22 +333,12 @@ impl ClientState {
                             info.velocity[2] as f32,
                         );
                         player_state.frame = info.frame as i32;
-                        if let Some(cmd) = info.command {
-                            player_state.command = cmd;
-                            player_state.viewangles = cmd.angles;
-                        }
-                        if let Some(model_index) = info.model_index {
-                            player_state.modelindex = model_index as i32;
-                        }
-                        if let Some(skin_num) = info.skin_num {
-                            player_state.skinnum = skin_num as i32;
-                        }
-                        if let Some(effects) = info.effects {
-                            player_state.effects = effects as i32;
-                        }
-                        if let Some(weapon_frame) = info.weapon_frame {
-                            player_state.weaponframe = weapon_frame as i32;
-                        }
+                        player_state.command = cmd;
+                        player_state.viewangles = cmd.angles;
+                        player_state.modelindex = model_index as i32;
+                        player_state.skinnum = skin_num as i32;
+                        player_state.effects = effects as i32;
+                        player_state.weaponframe = weapon_frame as i32;
                     }
                 }
             }
@@ -343,6 +352,7 @@ impl ClientState {
             }
             SvcMessage::ModelList(chunk) => {
                 apply_string_list(&mut self.models, chunk);
+                self.update_model_indices(chunk);
                 self.next_model = if chunk.next == 0 {
                     None
                 } else {
@@ -690,6 +700,23 @@ impl ClientState {
         }
 
         physents
+    }
+
+    fn update_model_indices(&mut self, chunk: &StringListChunk) {
+        let start = chunk.start as usize;
+        for (i, name) in chunk.items.iter().enumerate() {
+            let index = start + i;
+            if index > u8::MAX as usize {
+                continue;
+            }
+            let index = index as u8;
+            match name.as_str() {
+                "progs/spike.mdl" => self.spike_model_index = Some(index),
+                "progs/player.mdl" => self.player_model_index = Some(index),
+                "progs/flag.mdl" => self.flag_model_index = Some(index),
+                _ => {}
+            }
+        }
     }
 
     fn build_physents(
@@ -1056,6 +1083,47 @@ mod tests {
         assert_eq!(player_state.weaponframe, 5);
         assert_eq!(player_state.viewangles, Vec3::new(0.0, 1.0, 2.0));
         assert!((player_state.state_time - 4.988).abs() < 0.0001);
+    }
+
+    #[test]
+    fn playerinfo_defaults_model_fields() {
+        let mut state = ClientState::new();
+        state.apply_message(
+            &SvcMessage::ModelList(StringListChunk {
+                start: 1,
+                items: vec!["progs/player.mdl".to_string()],
+                next: 0,
+            }),
+            0,
+        );
+        state.apply_message(
+            &SvcMessage::PlayerInfo(qw_common::PlayerInfoMessage {
+                num: 0,
+                flags: 0,
+                origin: Vec3::new(10.0, 20.0, 30.0),
+                frame: 1,
+                msec: None,
+                command: None,
+                velocity: [0, 0, 0],
+                model_index: None,
+                skin_num: None,
+                effects: None,
+                weapon_frame: None,
+            }),
+            0,
+        );
+
+        assert_eq!(state.players[0].model_index, 1);
+        assert_eq!(state.players[0].skin_num, 0);
+        assert_eq!(state.players[0].effects, 0);
+        assert_eq!(state.players[0].weapon_frame, 0);
+
+        let frame = &state.frames[0];
+        let player_state = &frame.playerstate[0];
+        assert_eq!(player_state.modelindex, 1);
+        assert_eq!(player_state.skinnum, 0);
+        assert_eq!(player_state.effects, 0);
+        assert_eq!(player_state.weaponframe, 0);
     }
 
     #[test]
