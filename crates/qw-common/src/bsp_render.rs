@@ -109,6 +109,10 @@ impl BspRender {
     }
 }
 
+pub fn miptex_from_bytes(data: &[u8]) -> Result<BspTexture, BspError> {
+    parse_miptex(data, 0)
+}
+
 const DVERTEX_SIZE: usize = 12;
 const DEDGE_SIZE: usize = 4;
 const DSURFEDGE_SIZE: usize = 4;
@@ -243,51 +247,54 @@ fn parse_textures(data: &[u8]) -> Result<Vec<BspTexture>, BspError> {
             });
             continue;
         }
-        let offset = offset as usize;
-        if offset + 16 + 4 * 6 > data.len() {
-            return Err(BspError::InvalidLump);
-        }
-        let name = parse_texture_name(&data[offset..offset + 16]);
-        let width = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
-        let height = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
-        let mut offsets = [0u32; 4];
-        let mut cursor = offset + 24;
-        for slot in &mut offsets {
-            *slot = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
-            cursor += 4;
-        }
-        let mip_data = if offsets[0] == 0 {
-            None
-        } else {
-            let mut mips: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
-            for level in 0..4 {
-                let scale = 1u32 << level;
-                let level_width = (width / scale).max(1);
-                let level_height = (height / scale).max(1);
-                let size = (level_width * level_height) as usize;
-                let start = offset + offsets[level] as usize;
-                if start + size > data.len() {
-                    return Err(BspError::InvalidLump);
-                }
-                mips[level] = data[start..start + size].to_vec();
-            }
-            Some(MipTexture {
-                width,
-                height,
-                mips,
-            })
-        };
-
-        textures.push(BspTexture {
-            name,
-            width,
-            height,
-            offsets,
-            mip_data,
-        });
+        textures.push(parse_miptex(data, offset as usize)?);
     }
 
     Ok(textures)
+}
+
+fn parse_miptex(data: &[u8], offset: usize) -> Result<BspTexture, BspError> {
+    if offset + 16 + 4 * 6 > data.len() {
+        return Err(BspError::InvalidLump);
+    }
+    let name = parse_texture_name(&data[offset..offset + 16]);
+    let width = u32::from_le_bytes(data[offset + 16..offset + 20].try_into().unwrap());
+    let height = u32::from_le_bytes(data[offset + 20..offset + 24].try_into().unwrap());
+    let mut offsets = [0u32; 4];
+    let mut cursor = offset + 24;
+    for slot in &mut offsets {
+        *slot = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+    }
+    let mip_data = if offsets[0] == 0 {
+        None
+    } else {
+        let mut mips: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
+        for level in 0..4 {
+            let scale = 1u32 << level;
+            let level_width = (width / scale).max(1);
+            let level_height = (height / scale).max(1);
+            let size = (level_width * level_height) as usize;
+            let start = offset + offsets[level] as usize;
+            if start + size > data.len() {
+                return Err(BspError::InvalidLump);
+            }
+            mips[level] = data[start..start + size].to_vec();
+        }
+        Some(MipTexture {
+            width,
+            height,
+            mips,
+        })
+    };
+
+    Ok(BspTexture {
+        name,
+        width,
+        height,
+        offsets,
+        mip_data,
+    })
 }
 
 fn parse_texture_name(bytes: &[u8]) -> String {

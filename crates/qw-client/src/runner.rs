@@ -10,7 +10,8 @@ use crate::state::ClientState;
 use qw_common::{
     Bsp, BspCollision, BspError, BspRender, DataPathError, FsError, NetchanError, OobMessage,
     Palette, PaletteError, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK,
-    UserCmd, clc, find_game_dir, find_id1_dir, locate_data_dir,
+    UserCmd, Wad, clc, find_game_dir, find_id1_dir, locate_data_dir, miptex_from_bytes,
+    parse_entities, worldspawn_wad_list,
 };
 use std::path::PathBuf;
 
@@ -315,7 +316,9 @@ impl ClientRunner {
         let bsp = Bsp::from_bytes(bytes)?;
         let (_, checksum2) = bsp.map_checksums()?;
         if self.state.render_world_map.as_deref() != Some(map_name.as_str()) {
-            self.state.render_world = Some(BspRender::from_bsp(&bsp)?);
+            let mut render = BspRender::from_bsp(&bsp)?;
+            self.load_wad_textures(&bsp, &mut render);
+            self.state.render_world = Some(render);
             self.state.render_world_map = Some(map_name.clone());
         }
         if self.state.collision_map.as_deref() != Some(map_name.as_str()) {
@@ -429,6 +432,48 @@ impl ClientRunner {
         }
 
         Ok(())
+    }
+
+    fn load_wad_textures(&self, bsp: &Bsp, render: &mut BspRender) {
+        let Ok(text) = bsp.entities_text() else {
+            return;
+        };
+        let Ok(entities) = parse_entities(&text) else {
+            return;
+        };
+        let wad_list = worldspawn_wad_list(&entities);
+        if wad_list.is_empty() {
+            return;
+        }
+
+        let mut wads = Vec::new();
+        for wad_name in wad_list {
+            if let Ok(bytes) = self.client.fs.read(&wad_name) {
+                if let Ok(wad) = Wad::from_bytes(bytes) {
+                    wads.push(wad);
+                }
+            }
+        }
+        if wads.is_empty() {
+            return;
+        }
+
+        for texture in &mut render.textures {
+            if texture.mip_data.is_some() || texture.name.is_empty() {
+                continue;
+            }
+            for wad in &wads {
+                let Ok(bytes) = wad.get(&texture.name) else {
+                    continue;
+                };
+                let Ok(mut parsed) = miptex_from_bytes(bytes) else {
+                    continue;
+                };
+                parsed.name = texture.name.clone();
+                *texture = parsed;
+                break;
+            }
+        }
     }
 
     fn queue_missing_sounds(&mut self) -> Result<(), RunnerError> {
