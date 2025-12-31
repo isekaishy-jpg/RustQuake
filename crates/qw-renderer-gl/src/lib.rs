@@ -35,6 +35,7 @@ pub struct RenderView {
 pub struct RenderVertex {
     pub position: Vec3,
     pub tex_coords: [f32; 2],
+    pub lightmap_coords: [f32; 2],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +61,14 @@ pub struct RenderLightmap {
     pub height: u32,
     pub styles: Vec<u8>,
     pub samples: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LightmapBasis {
+    min_s: f32,
+    min_t: f32,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,7 +164,13 @@ fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderS
             _ => continue,
         };
         let tex_scale = texture_scale_for_face(bsp, face);
-        let lightmap = build_lightmap(bsp, face, &verts);
+        let lightmap_basis = lightmap_basis(&verts);
+        let lightmap = build_lightmap(bsp, face, lightmap_basis.as_ref());
+        let lightmap_basis = if lightmap.is_some() {
+            lightmap_basis
+        } else {
+            None
+        };
         let vertices = verts
             .into_iter()
             .map(|vertex| RenderVertex {
@@ -164,6 +179,14 @@ fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderS
                     [vertex.tex_coords[0] / width, vertex.tex_coords[1] / height]
                 } else {
                     vertex.tex_coords
+                },
+                lightmap_coords: if let Some(basis) = lightmap_basis {
+                    [
+                        (vertex.tex_coords[0] - basis.min_s) / 16.0,
+                        (vertex.tex_coords[1] - basis.min_t) / 16.0,
+                    ]
+                } else {
+                    [0.0, 0.0]
                 },
             })
             .collect::<Vec<_>>();
@@ -276,7 +299,7 @@ fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f3
 fn build_lightmap(
     bsp: &BspRender,
     face: &qw_common::Face,
-    verts: &[FaceVertex],
+    basis: Option<&LightmapBasis>,
 ) -> Option<RenderLightmap> {
     if face.light_ofs < 0 {
         return None;
@@ -285,7 +308,8 @@ fn build_lightmap(
         return None;
     }
 
-    let (width, height) = lightmap_dimensions(verts)?;
+    let basis = basis?;
+    let (width, height) = (basis.width, basis.height);
     let size = (width * height) as usize;
     if size == 0 {
         return None;
@@ -324,7 +348,7 @@ fn build_lightmap(
     })
 }
 
-fn lightmap_dimensions(verts: &[FaceVertex]) -> Option<(u32, u32)> {
+fn lightmap_basis(verts: &[FaceVertex]) -> Option<LightmapBasis> {
     let first = verts.first()?;
     let mut min_s = first.tex_coords[0];
     let mut max_s = first.tex_coords[0];
@@ -355,7 +379,12 @@ fn lightmap_dimensions(verts: &[FaceVertex]) -> Option<(u32, u32)> {
         return None;
     }
 
-    Some((width as u32, height as u32))
+    Some(LightmapBasis {
+        min_s,
+        min_t,
+        width: width as u32,
+        height: height as u32,
+    })
 }
 
 #[cfg(test)]
@@ -454,6 +483,7 @@ mod tests {
         assert_eq!(world.surfaces[0].indices, vec![0, 1, 2, 0, 2, 3]);
         assert_eq!(world.surfaces[0].texture_index, None);
         assert_eq!(world.surfaces[0].vertices[1].tex_coords, [1.0 / 64.0, 0.0]);
+        assert_eq!(world.surfaces[0].vertices[1].lightmap_coords, [0.0, 0.0]);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
         assert!(world.surfaces[0].lightmap.is_none());
     }
@@ -555,6 +585,7 @@ mod tests {
 
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
         let lightmap = world.surfaces[0].lightmap.as_ref().unwrap();
+        assert_eq!(world.surfaces[0].vertices[1].lightmap_coords, [2.0, 0.0]);
         assert_eq!(lightmap.width, 3);
         assert_eq!(lightmap.height, 3);
         assert_eq!(lightmap.styles, vec![0]);
