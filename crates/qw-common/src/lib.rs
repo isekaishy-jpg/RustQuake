@@ -3,6 +3,7 @@
 pub mod bsp;
 pub mod clc;
 pub mod client_messages;
+pub mod collision;
 pub mod com_checksum;
 pub mod com_parse;
 pub mod com_path;
@@ -26,6 +27,7 @@ pub mod wad;
 pub use bsp::*;
 pub use clc::*;
 pub use client_messages::*;
+pub use collision::*;
 pub use com_checksum::*;
 pub use com_parse::*;
 pub use com_path::*;

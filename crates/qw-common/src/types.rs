@@ -13,6 +13,14 @@ impl Vec3 {
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
+
+    pub fn dot(self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    pub fn scale(self, scalar: f32) -> Self {
+        Self::new(self.x * scalar, self.y * scalar, self.z * scalar)
+    }
 }
 
 impl Default for Vec3 {

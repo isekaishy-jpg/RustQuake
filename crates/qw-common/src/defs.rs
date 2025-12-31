@@ -69,6 +69,13 @@ pub const IT_SIGIL2: u32 = 1 << 29;
 pub const IT_SIGIL3: u32 = 1 << 30;
 pub const IT_SIGIL4: u32 = 1 << 31;
 
+pub const CONTENTS_EMPTY: i32 = -1;
+pub const CONTENTS_SOLID: i32 = -2;
+pub const CONTENTS_WATER: i32 = -3;
+pub const CONTENTS_SLIME: i32 = -4;
+pub const CONTENTS_LAVA: i32 = -5;
+pub const CONTENTS_SKY: i32 = -6;
+
 pub const PRINT_LOW: u8 = 0;
 pub const PRINT_MEDIUM: u8 = 1;
 pub const PRINT_HIGH: u8 = 2;
