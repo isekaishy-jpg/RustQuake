@@ -21,6 +21,9 @@ cargo run -p qw-client -- --connect 127.0.0.1:27500 --name unit
 Optional flags include `--data-dir`, `--download-dir`, `--qport`, `--rate`,
 `--topcolor`, and `--bottomcolor`.
 
+While running, you can type console commands into stdin (e.g. `name`, `skin`,
+`say`) and the client forwards them to the server.
+
 ## Upstream
 See docs/upstream.md for the exact upstream commit.
 
