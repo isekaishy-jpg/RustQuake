@@ -65,8 +65,20 @@ pub struct RenderLightmap {
 
 impl RenderLightmap {
     pub fn combined_samples(&self, lightstyles: &[String], time: f32) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write_combined_samples(lightstyles, time, &mut out);
+        out
+    }
+
+    pub fn write_combined_samples(&self, lightstyles: &[String], time: f32, out: &mut Vec<u8>) {
         let size = (self.width * self.height) as usize;
-        let mut out = vec![0u8; size];
+        if out.len() != size {
+            out.clear();
+            out.resize(size, 0);
+        } else {
+            out.fill(0);
+        }
+
         for (style_index, style_id) in self.styles.iter().enumerate() {
             let scale = style_value(lightstyles, *style_id, time);
             let samples = match self.samples.get(style_index) {
@@ -78,7 +90,6 @@ impl RenderLightmap {
                 out[idx] = sum.min(255.0).round() as u8;
             }
         }
-        out
     }
 }
 
@@ -96,6 +107,35 @@ pub struct RenderWorld {
     pub bsp: BspRender,
     pub surfaces: Vec<RenderSurface>,
     pub textures: Vec<RenderTexture>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuTexture {
+    pub width: u32,
+    pub height: u32,
+    pub mips: [Vec<u8>; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuLightmap {
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuSurface {
+    pub vertices: Vec<RenderVertex>,
+    pub indices: Vec<u32>,
+    pub texture_index: Option<usize>,
+    pub lightmap_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuWorld {
+    pub textures: Vec<GpuTexture>,
+    pub lightmaps: Vec<GpuLightmap>,
+    pub surfaces: Vec<GpuSurface>,
 }
 
 impl RenderWorld {
@@ -119,12 +159,55 @@ impl RenderWorld {
     }
 }
 
+fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
+    let textures = world
+        .textures
+        .iter()
+        .map(|texture| GpuTexture {
+            width: texture.width,
+            height: texture.height,
+            mips: texture.mips.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut lightmaps = Vec::new();
+    let mut surfaces = Vec::with_capacity(world.surfaces.len());
+
+    for surface in &world.surfaces {
+        let lightmap_index = surface.lightmap.as_ref().map(|lightmap| {
+            let mut samples = Vec::new();
+            lightmap.write_combined_samples(&[], 0.0, &mut samples);
+            let index = lightmaps.len();
+            lightmaps.push(GpuLightmap {
+                width: lightmap.width,
+                height: lightmap.height,
+                samples,
+            });
+            index
+        });
+
+        surfaces.push(GpuSurface {
+            vertices: surface.vertices.clone(),
+            indices: surface.indices.clone(),
+            texture_index: surface.texture_index,
+            lightmap_index,
+        });
+    }
+
+    GpuWorld {
+        textures,
+        lightmaps,
+        surfaces,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlRenderer {
     config: RendererConfig,
     frame_index: u64,
     last_view: Option<RenderView>,
     last_world: Option<RenderWorld>,
+    gpu_world: Option<GpuWorld>,
 }
 
 impl GlRenderer {
@@ -134,6 +217,7 @@ impl GlRenderer {
             frame_index: 0,
             last_view: None,
             last_world: None,
+            gpu_world: None,
         }
     }
 
@@ -150,11 +234,41 @@ impl GlRenderer {
     }
 
     pub fn set_world(&mut self, world: RenderWorld) {
+        self.gpu_world = Some(build_gpu_world(&world));
         self.last_world = Some(world);
     }
 
     pub fn world(&self) -> Option<&RenderWorld> {
         self.last_world.as_ref()
+    }
+
+    pub fn gpu_world(&self) -> Option<&GpuWorld> {
+        self.gpu_world.as_ref()
+    }
+
+    pub fn update_lightmaps(&mut self, lightstyles: &[String], time: f32) {
+        let (Some(world), Some(gpu_world)) = (&self.last_world, &mut self.gpu_world) else {
+            return;
+        };
+
+        for (surface_index, surface) in world.surfaces.iter().enumerate() {
+            let Some(lightmap) = surface.lightmap.as_ref() else {
+                continue;
+            };
+            let Some(lightmap_index) = gpu_world
+                .surfaces
+                .get(surface_index)
+                .and_then(|gpu_surface| gpu_surface.lightmap_index)
+            else {
+                continue;
+            };
+            let Some(gpu_lightmap) = gpu_world.lightmaps.get_mut(lightmap_index) else {
+                continue;
+            };
+            gpu_lightmap.width = lightmap.width;
+            gpu_lightmap.height = lightmap.height;
+            lightmap.write_combined_samples(lightstyles, time, &mut gpu_lightmap.samples);
+        }
     }
 }
 
@@ -472,6 +586,109 @@ mod tests {
         );
         renderer.set_world(world.clone());
         assert_eq!(renderer.world(), Some(&world));
+    }
+
+    #[test]
+    fn builds_gpu_world_lightmaps() {
+        let mut lighting = Vec::new();
+        lighting.extend_from_slice(&[5u8; 9]);
+
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(32.0, 0.0, 0.0),
+                Vec3::new(32.0, 32.0, 0.0),
+                Vec3::new(0.0, 32.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![qw_common::TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![qw_common::Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0, 255, 255, 255],
+                light_ofs: 0,
+            }],
+            textures: vec![qw_common::BspTexture {
+                name: "wall".to_string(),
+                width: 32,
+                height: 32,
+                offsets: [0; 4],
+                mip_data: None,
+            }],
+            lighting,
+        };
+
+        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        renderer.set_world(world);
+        let gpu_world = renderer.gpu_world().unwrap();
+        assert_eq!(gpu_world.lightmaps.len(), 1);
+        assert_eq!(gpu_world.surfaces[0].lightmap_index, Some(0));
+        assert_eq!(gpu_world.lightmaps[0].samples.len(), 9);
+    }
+
+    #[test]
+    fn updates_gpu_lightmaps_from_styles() {
+        let mut lighting = Vec::new();
+        lighting.extend_from_slice(&[100u8; 9]);
+
+        let bsp = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(32.0, 0.0, 0.0),
+                Vec3::new(32.0, 32.0, 0.0),
+                Vec3::new(0.0, 32.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![qw_common::TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![qw_common::Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0, 255, 255, 255],
+                light_ofs: 0,
+            }],
+            textures: vec![qw_common::BspTexture {
+                name: "wall".to_string(),
+                width: 32,
+                height: 32,
+                offsets: [0; 4],
+                mip_data: None,
+            }],
+            lighting,
+        };
+
+        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        renderer.set_world(world);
+
+        let mut styles = vec![String::new(); 1];
+        styles[0] = "b".to_string();
+        renderer.update_lightmaps(&styles, 0.0);
+
+        let gpu_world = renderer.gpu_world().unwrap();
+        assert_eq!(gpu_world.lightmaps[0].samples[0], 4);
     }
 
     #[test]

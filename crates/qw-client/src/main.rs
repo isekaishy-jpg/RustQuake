@@ -213,6 +213,7 @@ fn run() -> Result<(), AppError> {
 
         if audio.is_running() {
             renderer.set_view(build_render_view(&runner.state));
+            renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
             renderer.end_frame();
         }
