@@ -59,7 +59,7 @@ impl PcxImage {
                     let count = (byte & 0x3f) as usize;
                     let value = *data.get(offset).ok_or(PcxError::UnexpectedEof)?;
                     offset += 1;
-                    row.extend(std::iter::repeat(value).take(count));
+                    row.extend(std::iter::repeat_n(value, count));
                 } else {
                     row.push(byte);
                 }

@@ -448,10 +448,10 @@ impl ClientRunner {
 
         let mut wads = Vec::new();
         for wad_name in wad_list {
-            if let Ok(bytes) = self.client.fs.read(&wad_name) {
-                if let Ok(wad) = Wad::from_bytes(bytes) {
-                    wads.push(wad);
-                }
+            if let Ok(bytes) = self.client.fs.read(&wad_name)
+                && let Ok(wad) = Wad::from_bytes(bytes)
+            {
+                wads.push(wad);
             }
         }
         if wads.is_empty() {
