@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 
 use crate::cli::{CliAction, ClientMode, DEFAULT_QPORT};
 use crate::config::ClientConfig;
-use crate::input::InputBindings;
+use crate::input::{CommandTarget, InputBindings, InputState};
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
 use qw_audio::{AudioConfig, AudioSystem};
-use qw_common::{InfoError, InfoString, UserCmd};
+use qw_common::{InfoError, InfoString};
 use qw_renderer_gl::{GlRenderer, Renderer, RendererConfig};
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
@@ -99,8 +99,9 @@ fn run() -> Result<(), AppError> {
     let mut last_title: Option<String> = None;
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
-    let mut pending_cmds: VecDeque<String> = VecDeque::new();
+    let mut pending_server_cmds: VecDeque<String> = VecDeque::new();
     let input_bindings = InputBindings::default();
+    let mut input_state = InputState::default();
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -125,8 +126,9 @@ fn run() -> Result<(), AppError> {
                 &mut window,
                 &mut renderer,
                 &input_bindings,
+                &mut input_state,
                 event,
-                &mut pending_cmds,
+                &mut pending_server_cmds,
             ) {
                 return Ok(());
             }
@@ -161,12 +163,12 @@ fn run() -> Result<(), AppError> {
 
         if runner.session.state == SessionState::Connected {
             was_connected = true;
-            while let Some(cmd) = pending_cmds.pop_front() {
+            while let Some(cmd) = pending_server_cmds.pop_front() {
                 runner.send_string_cmd(&cmd)?;
             }
             let elapsed = last_move.elapsed();
             if elapsed >= Duration::from_millis(MOVE_INTERVAL_MS) {
-                let mut cmd = UserCmd::default();
+                let mut cmd = input_state.build_usercmd();
                 let msec = elapsed.as_millis().min(u128::from(u8::MAX)) as u8;
                 cmd.msec = msec;
                 cmd.angles = runner.state.view_angles;
@@ -186,14 +188,14 @@ fn run() -> Result<(), AppError> {
                     if runner.session.state == SessionState::Connected {
                         runner.send_string_cmd(&mapped)?;
                     } else {
-                        pending_cmds.push_back(mapped);
+                        pending_server_cmds.push_back(mapped);
                     }
                 }
                 Ok(None) => {
                     if runner.session.state == SessionState::Connected {
                         runner.send_string_cmd(&cmd)?;
                     } else {
-                        pending_cmds.push_back(cmd);
+                        pending_server_cmds.push_back(cmd);
                     }
                 }
                 Err(err) => {
@@ -304,6 +306,7 @@ fn handle_window_event(
     window: &mut GlfwWindow,
     renderer: &mut GlRenderer,
     input_bindings: &InputBindings,
+    input_state: &mut InputState,
     event: WindowEvent,
     pending_cmds: &mut VecDeque<String>,
 ) -> bool {
@@ -317,7 +320,9 @@ fn handle_window_event(
             false
         }
         WindowEvent::Key { key, action } => {
-            if let Some(cmd) = input_bindings.command_for(key, action) {
+            if let Some(cmd) = input_bindings.command_for(key, action)
+                && input_state.apply_command(&cmd) == CommandTarget::Server
+            {
                 pending_cmds.push_back(cmd);
             }
             if key == Key::Escape && action == Action::Press {
@@ -381,11 +386,13 @@ mod tests {
         let mut window = GlfwWindow::new(WindowConfig::default());
         let mut renderer = GlRenderer::new(RendererConfig::default());
         let bindings = InputBindings::default();
+        let mut input_state = InputState::default();
         let mut pending = VecDeque::new();
         let exit = handle_window_event(
             &mut window,
             &mut renderer,
             &bindings,
+            &mut input_state,
             WindowEvent::CloseRequested,
             &mut pending,
         );
@@ -394,23 +401,26 @@ mod tests {
     }
 
     #[test]
-    fn key_event_pushes_command() {
+    fn key_event_forwards_server_command() {
         let mut window = GlfwWindow::new(WindowConfig::default());
         let mut renderer = GlRenderer::new(RendererConfig::default());
-        let bindings = InputBindings::default();
+        let mut bindings = InputBindings::new();
+        bindings.bind_command(Key::Enter, "say hello");
+        let mut input_state = InputState::default();
         let mut pending = VecDeque::new();
         let exit = handle_window_event(
             &mut window,
             &mut renderer,
             &bindings,
+            &mut input_state,
             WindowEvent::Key {
-                key: Key::Up,
+                key: Key::Enter,
                 action: Action::Press,
             },
             &mut pending,
         );
         assert!(!exit);
-        assert_eq!(pending.pop_front(), Some("+forward".to_string()));
+        assert_eq!(pending.pop_front(), Some("say hello".to_string()));
     }
 
     #[test]
