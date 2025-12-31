@@ -1006,6 +1006,7 @@ mod tests {
     #[test]
     fn applies_playerinfo() {
         let mut state = ClientState::new();
+        state.server_time = 5.0;
         state.apply_message(
             &SvcMessage::PlayerInfo(qw_common::PlayerInfoMessage {
                 num: 0,
@@ -1054,6 +1055,7 @@ mod tests {
         assert_eq!(player_state.effects, 4);
         assert_eq!(player_state.weaponframe, 5);
         assert_eq!(player_state.viewangles, Vec3::new(0.0, 1.0, 2.0));
+        assert!((player_state.state_time - 4.988).abs() < 0.0001);
     }
 
     #[test]
