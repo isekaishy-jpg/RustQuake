@@ -2,10 +2,10 @@ use crate::prediction::{PhysEnt, PlayerMove};
 use qw_common::{
     BspCollision, ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS,
     MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
-    NailProjectile, PF_DEAD, PacketEntities, PacketEntitiesUpdate, PlayerState, STAT_ACTIVEWEAPON,
-    STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS,
-    STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk, SvcMessage,
-    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
+    NailProjectile, PF_DEAD, PacketEntities, PacketEntitiesUpdate, Palette, PlayerState,
+    STAT_ACTIVEWEAPON, STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS,
+    STAT_NAILS, STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk,
+    SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -78,6 +78,7 @@ pub struct ClientState {
     pub collision_map: Option<String>,
     pub render_world: Option<qw_common::BspRender>,
     pub render_world_map: Option<String>,
+    pub palette: Option<Palette>,
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
@@ -137,6 +138,7 @@ impl ClientState {
             collision_map: None,
             render_world: None,
             render_world_map: None,
+            palette: None,
             players,
             sounds: Vec::new(),
             models: Vec::new(),
@@ -190,6 +192,7 @@ impl ClientState {
                 self.collision_map = None;
                 self.render_world = None;
                 self.render_world_map = None;
+                self.palette = None;
                 self.sounds.clear();
                 self.models.clear();
                 self.player_model_index = None;

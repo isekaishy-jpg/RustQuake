@@ -7,11 +7,19 @@ use crate::bsp::{
 use crate::types::Vec3;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MipTexture {
+    pub width: u32,
+    pub height: u32,
+    pub mips: [Vec<u8>; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BspTexture {
     pub name: String,
     pub width: u32,
     pub height: u32,
     pub offsets: [u32; 4],
+    pub mip_data: Option<MipTexture>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -231,6 +239,7 @@ fn parse_textures(data: &[u8]) -> Result<Vec<BspTexture>, BspError> {
                 width: 0,
                 height: 0,
                 offsets: [0; 4],
+                mip_data: None,
             });
             continue;
         }
@@ -247,11 +256,34 @@ fn parse_textures(data: &[u8]) -> Result<Vec<BspTexture>, BspError> {
             *slot = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
             cursor += 4;
         }
+        let mip_data = if offsets[0] == 0 {
+            None
+        } else {
+            let mut mips: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
+            for level in 0..4 {
+                let scale = 1u32 << level;
+                let level_width = (width / scale).max(1);
+                let level_height = (height / scale).max(1);
+                let size = (level_width * level_height) as usize;
+                let start = offset + offsets[level] as usize;
+                if start + size > data.len() {
+                    return Err(BspError::InvalidLump);
+                }
+                mips[level] = data[start..start + size].to_vec();
+            }
+            Some(MipTexture {
+                width,
+                height,
+                mips,
+            })
+        };
+
         textures.push(BspTexture {
             name,
             width,
             height,
             offsets,
+            mip_data,
         });
     }
 
@@ -325,6 +357,51 @@ mod tests {
         assert_eq!(render.textures[0].name, "wall");
         assert_eq!(render.textures[0].width, 64);
         assert_eq!(render.textures[0].height, 32);
+        assert!(render.textures[0].mip_data.is_none());
+    }
+
+    #[test]
+    fn parses_embedded_texture_data() {
+        let mut lumps = vec![Vec::new(); HEADER_LUMPS];
+        let mut textures = Vec::new();
+
+        textures.extend_from_slice(&1i32.to_le_bytes());
+        textures.extend_from_slice(&8i32.to_le_bytes());
+
+        let mut name = [0u8; 16];
+        name[..4].copy_from_slice(b"EMBD");
+        textures.extend_from_slice(&name);
+        textures.extend_from_slice(&4u32.to_le_bytes());
+        textures.extend_from_slice(&4u32.to_le_bytes());
+
+        let base = 16 + 4 + 4 + 4 * 4;
+        let offset0 = base as u32;
+        let offset1 = offset0 + 16;
+        let offset2 = offset1 + 4;
+        let offset3 = offset2 + 1;
+        textures.extend_from_slice(&offset0.to_le_bytes());
+        textures.extend_from_slice(&offset1.to_le_bytes());
+        textures.extend_from_slice(&offset2.to_le_bytes());
+        textures.extend_from_slice(&offset3.to_le_bytes());
+
+        textures.extend_from_slice(&[1u8; 16]);
+        textures.extend_from_slice(&[2u8; 4]);
+        textures.extend_from_slice(&[3u8; 1]);
+        textures.extend_from_slice(&[4u8; 1]);
+
+        lumps[LUMP_TEXTURES] = textures;
+
+        let data = build_bsp(lumps);
+        let bsp = Bsp::from_bytes(data).unwrap();
+        let render = BspRender::from_bsp(&bsp).unwrap();
+
+        let mip = render.textures[0].mip_data.as_ref().unwrap();
+        assert_eq!(mip.mips[0].len(), 16);
+        assert_eq!(mip.mips[1].len(), 4);
+        assert_eq!(mip.mips[2].len(), 1);
+        assert_eq!(mip.mips[3].len(), 1);
+        assert_eq!(mip.mips[0][0], 1);
+        assert_eq!(mip.mips[3][0], 4);
     }
 
     #[test]

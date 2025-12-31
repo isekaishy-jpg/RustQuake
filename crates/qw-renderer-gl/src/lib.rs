@@ -1,4 +1,4 @@
-use qw_common::{BspRender, Vec3};
+use qw_common::{BspRender, Palette, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -44,19 +44,38 @@ pub struct RenderSurface {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RenderTexture {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub mips: [Vec<u8>; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderWorld {
     pub map_name: String,
     pub bsp: BspRender,
     pub surfaces: Vec<RenderSurface>,
+    pub textures: Vec<RenderTexture>,
 }
 
 impl RenderWorld {
     pub fn from_bsp(map_name: impl Into<String>, bsp: BspRender) -> Self {
+        Self::from_bsp_with_palette(map_name, bsp, None)
+    }
+
+    pub fn from_bsp_with_palette(
+        map_name: impl Into<String>,
+        bsp: BspRender,
+        palette: Option<&Palette>,
+    ) -> Self {
         let surfaces = build_surfaces(&bsp);
+        let textures = build_textures(&bsp, palette);
         Self {
             map_name: map_name.into(),
             bsp,
             surfaces,
+            textures,
         }
     }
 }
@@ -139,6 +158,39 @@ fn build_surfaces(bsp: &BspRender) -> Vec<RenderSurface> {
         });
     }
     surfaces
+}
+
+fn build_textures(bsp: &BspRender, palette: Option<&Palette>) -> Vec<RenderTexture> {
+    let Some(palette) = palette else {
+        return Vec::new();
+    };
+
+    let mut textures = Vec::new();
+    for texture in &bsp.textures {
+        let Some(mip) = texture.mip_data.as_ref() else {
+            continue;
+        };
+        if texture.name.is_empty() {
+            continue;
+        }
+
+        let transparent_index = if texture.name.starts_with('{') {
+            Some(255)
+        } else {
+            None
+        };
+        let mips = std::array::from_fn(|level| {
+            palette.expand_indices(&mip.mips[level], transparent_index)
+        });
+        textures.push(RenderTexture {
+            name: texture.name.clone(),
+            width: mip.width,
+            height: mip.height,
+            mips,
+        });
+    }
+
+    textures
 }
 
 fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<String> {
@@ -240,6 +292,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 offsets: [0; 4],
+                mip_data: None,
             }],
             lighting: Vec::new(),
         };
@@ -248,5 +301,78 @@ mod tests {
         assert_eq!(world.surfaces.len(), 1);
         assert_eq!(world.surfaces[0].vertices.len(), 4);
         assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
+    }
+
+    #[test]
+    fn builds_textures_from_palette() {
+        let mut palette_bytes = vec![0u8; 256 * 3];
+        palette_bytes[0] = 10;
+        palette_bytes[1] = 20;
+        palette_bytes[2] = 30;
+        let palette = Palette::from_bytes(&palette_bytes).unwrap();
+
+        let mip = qw_common::MipTexture {
+            width: 1,
+            height: 1,
+            mips: [vec![0], vec![0], vec![0], vec![0]],
+        };
+        let bsp = BspRender {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            texinfo: Vec::new(),
+            faces: Vec::new(),
+            textures: vec![qw_common::BspTexture {
+                name: "brick".to_string(),
+                width: 1,
+                height: 1,
+                offsets: [0; 4],
+                mip_data: Some(mip),
+            }],
+            lighting: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
+        assert_eq!(world.textures.len(), 1);
+        assert_eq!(world.textures[0].mips[0], vec![10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn applies_transparent_index_for_brace_textures() {
+        let mut palette_bytes = vec![0u8; 256 * 3];
+        palette_bytes[0] = 10;
+        palette_bytes[1] = 20;
+        palette_bytes[2] = 30;
+        let base = 255 * 3;
+        palette_bytes[base] = 40;
+        palette_bytes[base + 1] = 50;
+        palette_bytes[base + 2] = 60;
+        let palette = Palette::from_bytes(&palette_bytes).unwrap();
+
+        let mip = qw_common::MipTexture {
+            width: 2,
+            height: 2,
+            mips: [vec![0, 255, 0, 255], vec![0], vec![0], vec![0]],
+        };
+        let bsp = BspRender {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            texinfo: Vec::new(),
+            faces: Vec::new(),
+            textures: vec![qw_common::BspTexture {
+                name: "{water".to_string(),
+                width: 2,
+                height: 2,
+                offsets: [0; 4],
+                mip_data: Some(mip),
+            }],
+            lighting: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
+        let rgba = &world.textures[0].mips[0];
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&rgba[4..8], &[0, 0, 0, 0]);
     }
 }

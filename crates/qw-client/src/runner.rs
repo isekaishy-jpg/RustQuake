@@ -9,8 +9,8 @@ use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
     Bsp, BspCollision, BspError, BspRender, DataPathError, FsError, NetchanError, OobMessage,
-    QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc,
-    find_game_dir, find_id1_dir, locate_data_dir,
+    Palette, PaletteError, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK,
+    UserCmd, clc, find_game_dir, find_id1_dir, locate_data_dir,
 };
 use std::path::PathBuf;
 
@@ -23,6 +23,7 @@ pub enum RunnerError {
     Buffer(SizeBufError),
     Fs(FsError),
     Bsp(BspError),
+    Palette(PaletteError),
     DataPath(DataPathError),
     MissingGameDir(String),
     NotConnected,
@@ -61,6 +62,12 @@ impl From<FsError> for RunnerError {
 impl From<BspError> for RunnerError {
     fn from(err: BspError) -> Self {
         RunnerError::Bsp(err)
+    }
+}
+
+impl From<PaletteError> for RunnerError {
+    fn from(err: PaletteError) -> Self {
+        RunnerError::Palette(err)
     }
 }
 
@@ -302,6 +309,7 @@ impl ClientRunner {
 
     fn map_checksum2(&mut self, data: &qw_common::ServerData) -> Result<u32, RunnerError> {
         self.ensure_filesystem(data)?;
+        self.ensure_palette()?;
         let map_name = map_path(&data.level_name);
         let bytes = self.client.fs.read(&map_name)?;
         let bsp = Bsp::from_bytes(bytes)?;
@@ -404,6 +412,22 @@ impl ClientRunner {
 
         self.client.fs = fs;
         self.fs_game_dir = Some(data.game_dir.clone());
+        Ok(())
+    }
+
+    fn ensure_palette(&mut self) -> Result<(), RunnerError> {
+        if self.state.palette.is_some() {
+            return Ok(());
+        }
+
+        match self.client.fs.read("gfx/palette.lmp") {
+            Ok(bytes) => {
+                self.state.palette = Some(Palette::from_bytes(&bytes)?);
+            }
+            Err(FsError::NotFound) => {}
+            Err(err) => return Err(err.into()),
+        }
+
         Ok(())
     }
 

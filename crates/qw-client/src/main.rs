@@ -370,7 +370,11 @@ fn update_render_world(
     if last_world.as_deref() == Some(map_name.as_str()) {
         return;
     }
-    renderer.set_world(RenderWorld::from_bsp(map_name.clone(), world.clone()));
+    renderer.set_world(RenderWorld::from_bsp_with_palette(
+        map_name.clone(),
+        world.clone(),
+        state.palette.as_ref(),
+    ));
     *last_world = Some(map_name.clone());
 }
 
