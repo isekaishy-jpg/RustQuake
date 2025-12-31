@@ -216,6 +216,39 @@ impl ClientState {
                         player.weapon_frame = weapon_frame;
                     }
                 }
+
+                let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
+                if let Some(state) = self.frames.get_mut(frame_index) {
+                    let slot = info.num as usize;
+                    if let Some(player_state) = state.playerstate.get_mut(slot) {
+                        player_state.messagenum = incoming_sequence as i32;
+                        player_state.state_time = self.server_time as f64;
+                        player_state.flags = info.flags as i32;
+                        player_state.origin = info.origin;
+                        player_state.velocity = Vec3::new(
+                            info.velocity[0] as f32,
+                            info.velocity[1] as f32,
+                            info.velocity[2] as f32,
+                        );
+                        player_state.frame = info.frame as i32;
+                        if let Some(cmd) = info.command {
+                            player_state.command = cmd;
+                            player_state.viewangles = cmd.angles;
+                        }
+                        if let Some(model_index) = info.model_index {
+                            player_state.modelindex = model_index as i32;
+                        }
+                        if let Some(skin_num) = info.skin_num {
+                            player_state.skinnum = skin_num as i32;
+                        }
+                        if let Some(effects) = info.effects {
+                            player_state.effects = effects as i32;
+                        }
+                        if let Some(weapon_frame) = info.weapon_frame {
+                            player_state.weaponframe = weapon_frame as i32;
+                        }
+                    }
+                }
             }
             SvcMessage::SoundList(chunk) => {
                 apply_string_list(&mut self.sounds, chunk);
@@ -579,6 +612,16 @@ mod tests {
         assert_eq!(state.players[0].skin_num, 3);
         assert_eq!(state.players[0].effects, 4);
         assert_eq!(state.players[0].weapon_frame, 5);
+
+        let frame = &state.frames[0];
+        let player_state = &frame.playerstate[0];
+        assert_eq!(player_state.origin, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(player_state.velocity, Vec3::new(10.0, 20.0, 30.0));
+        assert_eq!(player_state.modelindex, 2);
+        assert_eq!(player_state.skinnum, 3);
+        assert_eq!(player_state.effects, 4);
+        assert_eq!(player_state.weaponframe, 5);
+        assert_eq!(player_state.viewangles, Vec3::new(0.0, 1.0, 2.0));
     }
 
     #[test]
