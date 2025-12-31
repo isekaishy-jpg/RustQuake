@@ -1,4 +1,4 @@
-use qw_common::{AliasModel, BspRender, FaceVertex, Palette, Sprite, Vec3};
+use qw_common::{AliasModel, BspRender, FaceVertex, MdlFrame, Palette, Sprite, SpriteImage, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -152,6 +152,25 @@ pub enum RenderModelKind {
 pub struct RenderModel {
     pub kind: RenderModelKind,
     pub textures: Vec<RenderModelTexture>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RenderModelFrame<'a> {
+    Alias(&'a MdlFrame),
+    Sprite(&'a SpriteImage),
+}
+
+impl RenderModel {
+    pub fn frame_at_time(&self, frame: u32, time: f32) -> Option<RenderModelFrame<'_>> {
+        match &self.kind {
+            RenderModelKind::Alias(model) => model
+                .frame_at_time(frame as usize, time)
+                .map(RenderModelFrame::Alias),
+            RenderModelKind::Sprite(sprite) => sprite
+                .frame_at_time(frame as usize, time)
+                .map(RenderModelFrame::Sprite),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -668,7 +687,7 @@ fn style_value(lightstyles: &[String], style_id: u8, time: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qw_common::SpriteHeader;
+    use qw_common::{SpriteFrame, SpriteHeader, SpriteImage};
 
     #[test]
     fn resizes_to_nonzero_dimensions() {
@@ -743,6 +762,48 @@ mod tests {
         })];
         renderer.set_models(models.clone());
         assert_eq!(renderer.models(), &models);
+    }
+
+    #[test]
+    fn resolves_sprite_group_frame_by_time() {
+        let frame_a = SpriteImage {
+            width: 1,
+            height: 1,
+            origin: (0, 0),
+            pixels: vec![1],
+        };
+        let frame_b = SpriteImage {
+            width: 1,
+            height: 1,
+            origin: (0, 0),
+            pixels: vec![2],
+        };
+        let sprite = Sprite {
+            header: SpriteHeader {
+                sprite_type: 0,
+                bounding_radius: 0.0,
+                width: 1,
+                height: 1,
+                num_frames: 1,
+                beam_length: 0.0,
+                sync_type: 0,
+            },
+            frames: vec![SpriteFrame::Group {
+                intervals: vec![0.1, 0.2],
+                frames: vec![frame_a, frame_b],
+            }],
+        };
+        let model = RenderModel {
+            kind: RenderModelKind::Sprite(sprite),
+            textures: Vec::new(),
+        };
+        let frame = model.frame_at_time(0, 0.15).unwrap();
+        match frame {
+            RenderModelFrame::Sprite(image) => {
+                assert_eq!(image.pixels[0], 2);
+            }
+            _ => panic!("expected sprite frame"),
+        }
     }
 
     #[test]
