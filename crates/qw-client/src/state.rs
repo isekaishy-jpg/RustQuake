@@ -1,4 +1,4 @@
-use crate::prediction::PlayerMove;
+use crate::prediction::{PhysEnt, PlayerMove};
 use qw_common::{
     BspCollision, ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS,
     MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
@@ -500,13 +500,23 @@ impl ClientState {
         cmd: UserCmd,
         spectator: bool,
     ) -> Option<PlayerState> {
+        self.predict_usercmd_with_physents(from, cmd, spectator, None)
+    }
+
+    fn predict_usercmd_with_physents(
+        &self,
+        from: &PlayerState,
+        cmd: UserCmd,
+        spectator: bool,
+        physents: Option<&[PhysEnt]>,
+    ) -> Option<PlayerState> {
         if cmd.msec > 50 {
             let mut split = cmd;
             split.msec /= 2;
-            let mid = self.predict_usercmd(from, split, spectator)?;
-            return self.predict_usercmd(&mid, split, spectator);
+            let mid = self.predict_usercmd_with_physents(from, split, spectator, physents)?;
+            return self.predict_usercmd_with_physents(&mid, split, spectator, physents);
         }
-        self.predict_usercmd_internal(from, cmd, spectator)
+        self.predict_usercmd_internal(from, cmd, spectator, physents)
     }
 
     fn predict_usercmd_internal(
@@ -514,6 +524,7 @@ impl ClientState {
         from: &PlayerState,
         cmd: UserCmd,
         spectator: bool,
+        physents: Option<&[PhysEnt]>,
     ) -> Option<PlayerState> {
         let collision = self.collision.as_ref()?;
         let movevars = self.serverdata.as_ref()?.movevars;
@@ -526,6 +537,14 @@ impl ClientState {
         pmove.dead = self.stats[STAT_HEALTH] <= 0;
         pmove.spectator = spectator;
         pmove.add_world(0);
+        if let Some(physents) = physents {
+            for ent in physents {
+                if ent.model == Some(0) {
+                    continue;
+                }
+                pmove.add_physent(ent.clone());
+            }
+        }
         pmove.simulate(collision, movevars);
 
         let mut out = *from;
@@ -555,9 +574,10 @@ impl ClientState {
 
         let player_num = data.player_num as usize;
         let spectator = data.spectator;
+        let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
+        let physents = self.build_physents(&self.frames[frame_index], player_num);
         let mut from_seq = incoming_sequence;
-        let mut from_state =
-            self.frames[(incoming_sequence as usize) & UPDATE_MASK].playerstate[player_num];
+        let mut from_state = self.frames[frame_index].playerstate[player_num];
         let mut to_state = None;
         let mut to_seq = None;
 
@@ -568,7 +588,9 @@ impl ClientState {
             }
             let index = (seq as usize) & UPDATE_MASK;
             let cmd = self.frames[index].cmd;
-            let Some(predicted) = self.predict_usercmd(&from_state, cmd, spectator) else {
+            let Some(predicted) =
+                self.predict_usercmd_with_physents(&from_state, cmd, spectator, Some(&physents))
+            else {
                 break;
             };
             self.frames[index].playerstate[player_num] = predicted;
@@ -626,6 +648,59 @@ impl ClientState {
             from_state.velocity.z + frac * (to_state.velocity.z - from_state.velocity.z),
         );
         self.sim_angles = from_state.viewangles;
+    }
+
+    fn build_physents(&self, frame: &Frame, player_num: usize) -> Vec<PhysEnt> {
+        let mut physents = Vec::new();
+        physents.push(PhysEnt {
+            origin: Vec3::default(),
+            model: Some(0),
+            mins: Vec3::default(),
+            maxs: Vec3::default(),
+            info: 0,
+        });
+
+        let player_mins = Vec3::new(-16.0, -16.0, -24.0);
+        let player_maxs = Vec3::new(16.0, 16.0, 32.0);
+
+        for (index, state) in frame.playerstate.iter().enumerate() {
+            if index == player_num || state.messagenum == 0 {
+                continue;
+            }
+            physents.push(PhysEnt {
+                origin: state.origin,
+                model: None,
+                mins: player_mins,
+                maxs: player_maxs,
+                info: index as i32,
+            });
+        }
+
+        let entity_count = frame.packet_entities.num_entities;
+        for ent in frame.packet_entities.entities.iter().take(entity_count) {
+            if ent.modelindex <= 0 {
+                continue;
+            }
+            let model_index = ent.modelindex as usize;
+            let Some(name) = self.models.get(model_index) else {
+                continue;
+            };
+            if !name.starts_with('*') {
+                continue;
+            }
+            let Ok(submodel_index) = name[1..].parse::<usize>() else {
+                continue;
+            };
+            physents.push(PhysEnt {
+                origin: ent.origin,
+                model: Some(submodel_index),
+                mins: Vec3::default(),
+                maxs: Vec3::default(),
+                info: ent.number,
+            });
+        }
+
+        physents
     }
 
     pub fn clear_frame_events(&mut self) {
