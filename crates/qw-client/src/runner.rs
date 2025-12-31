@@ -1337,6 +1337,7 @@ mod tests {
 
     #[test]
     fn queues_skin_downloads_after_userinfo() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let server = UdpSocket::bind("127.0.0.1:0").unwrap();
         let server_addr = server.local_addr().unwrap();
         let net = NetClient::connect(server_addr).unwrap();
@@ -1345,6 +1346,12 @@ mod tests {
         let mut runner = ClientRunner::new(net, session);
 
         let dir = temp_dir();
+        let download_dir = temp_dir();
+        let old_download = std::env::var("RUSTQUAKE_DOWNLOAD_DIR").ok();
+        // Safety: env var mutation is process-global; guard with ENV_LOCK.
+        unsafe {
+            std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", &download_dir);
+        }
         runner.client.fs.add_game_dir(&dir).unwrap();
         runner.fs_game_dir = Some("id1".to_string());
         runner.signon_phase = SignonPhase::Done;
@@ -1390,6 +1397,16 @@ mod tests {
         assert!(download.final_path.ends_with(&expected));
         assert!(runner.download_queue.is_empty());
 
+        if let Some(value) = old_download {
+            unsafe {
+                std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("RUSTQUAKE_DOWNLOAD_DIR");
+            }
+        }
+        std::fs::remove_dir_all(download_dir).ok();
         std::fs::remove_dir_all(dir).ok();
     }
 }
