@@ -49,6 +49,8 @@ impl Default for InputBindings {
         bindings.bind_toggle(Key::Left, "moveleft");
         bindings.bind_toggle(Key::Right, "moveright");
         bindings.bind_toggle(Key::Space, "jump");
+        bindings.bind_toggle(Key::Shift, "speed");
+        bindings.bind_toggle(Key::Mouse1, "attack");
         bindings.bind_command(Key::Enter, "messagemode");
         bindings
     }
@@ -58,6 +60,8 @@ const FORWARD_SPEED: i16 = 200;
 const BACK_SPEED: i16 = 200;
 const SIDE_SPEED: i16 = 350;
 const UP_SPEED: i16 = 200;
+const SPEED_MULT: i32 = 2;
+const BUTTON_ATTACK: u8 = 1;
 const BUTTON_JUMP: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +79,9 @@ pub struct InputState {
     up: bool,
     down: bool,
     jump: bool,
+    attack: bool,
+    speed: bool,
+    impulse: Option<u8>,
 }
 
 impl InputState {
@@ -91,13 +98,21 @@ impl InputState {
             return self.handle_toggle(rest, false);
         }
 
+        if let Some(rest) = trimmed.strip_prefix("impulse") {
+            let value = rest.trim();
+            if let Ok(parsed) = value.parse::<u8>() {
+                self.impulse = Some(parsed);
+            }
+            return CommandTarget::Local;
+        }
+
         match trimmed {
             "messagemode" => CommandTarget::Local,
             _ => CommandTarget::Server,
         }
     }
 
-    pub fn build_usercmd(&self) -> UserCmd {
+    pub fn build_usercmd(&mut self) -> UserCmd {
         let mut cmd = UserCmd::default();
         if self.forward {
             cmd.forwardmove = cmd.forwardmove.saturating_add(FORWARD_SPEED);
@@ -120,6 +135,15 @@ impl InputState {
         if self.jump {
             cmd.buttons |= BUTTON_JUMP;
         }
+        if self.attack {
+            cmd.buttons |= BUTTON_ATTACK;
+        }
+        if self.speed {
+            scale_move(&mut cmd, SPEED_MULT);
+        }
+        if let Some(impulse) = self.impulse.take() {
+            cmd.impulse = impulse;
+        }
         cmd
     }
 
@@ -132,10 +156,19 @@ impl InputState {
             "moveup" => self.up = pressed,
             "movedown" => self.down = pressed,
             "jump" => self.jump = pressed,
+            "attack" => self.attack = pressed,
+            "speed" => self.speed = pressed,
             _ => return CommandTarget::Server,
         }
         CommandTarget::Local
     }
+}
+
+fn scale_move(cmd: &mut UserCmd, scale: i32) {
+    cmd.forwardmove =
+        ((cmd.forwardmove as i32) * scale).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    cmd.sidemove = ((cmd.sidemove as i32) * scale).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+    cmd.upmove = ((cmd.upmove as i32) * scale).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 }
 
 #[cfg(test)]
@@ -188,6 +221,22 @@ mod tests {
         state.apply_command("+jump");
         let cmd = state.build_usercmd();
         assert_eq!(cmd.buttons & BUTTON_JUMP, BUTTON_JUMP);
+    }
+
+    #[test]
+    fn attack_sets_button_bit() {
+        let mut state = InputState::default();
+        state.apply_command("+attack");
+        let cmd = state.build_usercmd();
+        assert_eq!(cmd.buttons & BUTTON_ATTACK, BUTTON_ATTACK);
+    }
+
+    #[test]
+    fn impulse_sets_cmd_value() {
+        let mut state = InputState::default();
+        assert_eq!(state.apply_command("impulse 5"), CommandTarget::Local);
+        let cmd = state.build_usercmd();
+        assert_eq!(cmd.impulse, 5);
     }
 
     #[test]

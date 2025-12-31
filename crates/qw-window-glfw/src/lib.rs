@@ -24,10 +24,16 @@ pub enum Key {
     Space,
     Tab,
     Backspace,
+    Shift,
+    Ctrl,
+    Alt,
     Up,
     Down,
     Left,
     Right,
+    Mouse1,
+    Mouse2,
+    Mouse3,
     Other(u16),
 }
 
