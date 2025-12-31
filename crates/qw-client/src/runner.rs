@@ -300,6 +300,13 @@ impl ClientRunner {
                 if !command.is_empty() {
                     self.send_string_cmd(command)?;
                 }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("fullserverinfo") {
+                let info = rest.trim_start();
+                if !info.is_empty() {
+                    self.state.serverinfo.set_raw(info);
+                }
             }
         }
         Ok(())
@@ -994,6 +1001,44 @@ mod tests {
         let mut reader = MsgReader::new(&payload);
         assert_eq!(reader.read_u8().unwrap(), Clc::StringCmd as u8);
         assert_eq!(reader.read_string().unwrap(), "spawn 1 0");
+    }
+
+    #[test]
+    fn applies_fullserverinfo_from_stufftext() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let server_addr = server.local_addr().unwrap();
+
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let mut buf = SizeBuf::new(128);
+        qw_common::write_svc_message(
+            &mut buf,
+            &SvcMessage::StuffText("fullserverinfo \\hostname\\unit\n".to_string()),
+        )
+        .unwrap();
+        let mut server_chan = Netchan::new(27001);
+        let packet = server_chan.build_packet(buf.as_slice(), false).unwrap();
+
+        let client_port = runner.net.local_addr().unwrap().port();
+        let client_addr = std::net::SocketAddr::from(([127, 0, 0, 1], client_port));
+        server.send_to(&packet, client_addr).unwrap();
+
+        let mut client_buf = [0u8; 256];
+        for _ in 0..10 {
+            let _ = runner.poll_once(&mut client_buf).unwrap();
+            if runner.state.serverinfo.as_str().contains("\\hostname\\unit") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(runner.state.serverinfo.as_str().contains("\\hostname\\unit"));
     }
 
     fn recv_payload(server: &UdpSocket, chan: &mut Netchan) -> Vec<u8> {
