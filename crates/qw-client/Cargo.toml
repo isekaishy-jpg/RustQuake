@@ -5,4 +5,7 @@ edition = "2024"
 license = "GPL-2.0-only"
 
 [dependencies]
+qw-audio = { path = "../qw-audio" }
 qw-common = { path = "../qw-common" }
+qw-renderer-gl = { path = "../qw-renderer-gl" }
+qw-window-glfw = { path = "../qw-window-glfw" }

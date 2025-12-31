@@ -17,7 +17,10 @@ use crate::config::ClientConfig;
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
+use qw_audio::{AudioConfig, AudioSystem};
 use qw_common::{InfoError, InfoString, UserCmd};
+use qw_renderer_gl::{GlRenderer, Renderer, RendererConfig};
+use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
 
@@ -70,6 +73,15 @@ fn run() -> Result<(), AppError> {
     }
 
     let server = args.server.ok_or(cli::CliError::MissingServer)?;
+    let mut window = GlfwWindow::new(WindowConfig::default());
+    let (width, height) = window.size();
+    let mut renderer = GlRenderer::new(RendererConfig {
+        width,
+        height,
+        ..RendererConfig::default()
+    });
+    let audio = AudioSystem::new(AudioConfig::default());
+
     let server_addr = std::net::SocketAddr::from(server.to_socket_addr());
     let net = NetClient::connect(server_addr)?;
     let qport = if args.qport == 0 {
@@ -104,6 +116,12 @@ fn run() -> Result<(), AppError> {
         }
     });
     loop {
+        for event in window.poll_events() {
+            if handle_window_event(&mut window, &mut renderer, event) {
+                return Ok(());
+            }
+        }
+
         if let Some(packet) = runner.poll_once(&mut buf)? {
             match packet {
                 crate::client::ClientPacket::Messages(_) => {
@@ -171,6 +189,11 @@ fn run() -> Result<(), AppError> {
                     println!("[client] invalid userinfo: {err}");
                 }
             }
+        }
+
+        if audio.is_running() {
+            renderer.begin_frame();
+            renderer.end_frame();
         }
 
         std::thread::sleep(Duration::from_millis(1));
@@ -266,6 +289,31 @@ fn quote_if_needed(value: &str) -> String {
     }
 }
 
+fn handle_window_event(
+    window: &mut GlfwWindow,
+    renderer: &mut GlRenderer,
+    event: WindowEvent,
+) -> bool {
+    match event {
+        WindowEvent::CloseRequested => {
+            window.close();
+            true
+        }
+        WindowEvent::Resized(width, height) => {
+            renderer.resize(width, height);
+            false
+        }
+        WindowEvent::Key { key, action } => {
+            if key == Key::Escape && action == Action::Press {
+                window.close();
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +345,14 @@ mod tests {
             .expect("expected setinfo");
         assert_eq!(cmd, "setinfo *ver rq28");
         assert!(info.as_str().contains("\\*ver\\rq28"));
+    }
+
+    #[test]
+    fn window_close_event_triggers_exit() {
+        let mut window = GlfwWindow::new(WindowConfig::default());
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let exit = handle_window_event(&mut window, &mut renderer, WindowEvent::CloseRequested);
+        assert!(exit);
+        assert!(window.should_close());
     }
 }

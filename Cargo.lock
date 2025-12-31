@@ -10,7 +10,10 @@ version = "0.1.0"
 name = "qw-client"
 version = "0.1.0"
 dependencies = [
+ "qw-audio",
  "qw-common",
+ "qw-renderer-gl",
+ "qw-window-glfw",
 ]
 
 [[package]]
