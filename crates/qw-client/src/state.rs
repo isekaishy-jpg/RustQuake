@@ -11,8 +11,13 @@ pub struct PlayerInfo {
     pub userinfo: InfoString,
     pub origin: Vec3,
     pub frame: u8,
+    pub msec: u8,
+    pub cmd: UserCmd,
     pub velocity: [i16; 3],
     pub model_index: u8,
+    pub skin_num: u8,
+    pub effects: u8,
+    pub weapon_frame: u8,
     pub frags: i16,
     pub ping: i16,
     pub packet_loss: u8,
@@ -26,8 +31,13 @@ impl PlayerInfo {
             userinfo: InfoString::new(MAX_INFO_STRING),
             origin: Vec3::default(),
             frame: 0,
+            msec: 0,
+            cmd: UserCmd::default(),
             velocity: [0; 3],
             model_index: 0,
+            skin_num: 0,
+            effects: 0,
+            weapon_frame: 0,
             frags: 0,
             ping: 0,
             packet_loss: 0,
@@ -187,8 +197,23 @@ impl ClientState {
                     player.origin = info.origin;
                     player.frame = info.frame;
                     player.velocity = info.velocity;
+                    if let Some(msec) = info.msec {
+                        player.msec = msec;
+                    }
+                    if let Some(cmd) = info.command {
+                        player.cmd = cmd;
+                    }
                     if let Some(model_index) = info.model_index {
                         player.model_index = model_index;
+                    }
+                    if let Some(skin) = info.skin_num {
+                        player.skin_num = skin;
+                    }
+                    if let Some(effects) = info.effects {
+                        player.effects = effects;
+                    }
+                    if let Some(weapon_frame) = info.weapon_frame {
+                        player.weapon_frame = weapon_frame;
                     }
                 }
             }
@@ -519,16 +544,29 @@ mod tests {
         state.apply_message(
             &SvcMessage::PlayerInfo(qw_common::PlayerInfoMessage {
                 num: 0,
-                flags: 0,
+                flags: qw_common::PF_MSEC as u16
+                    | qw_common::PF_COMMAND as u16
+                    | qw_common::PF_MODEL as u16
+                    | qw_common::PF_SKINNUM as u16
+                    | qw_common::PF_EFFECTS as u16
+                    | qw_common::PF_WEAPONFRAME as u16,
                 origin: Vec3::new(1.0, 2.0, 3.0),
                 frame: 4,
-                msec: None,
-                command: None,
+                msec: Some(12),
+                command: Some(UserCmd {
+                    msec: 5,
+                    angles: Vec3::new(0.0, 1.0, 2.0),
+                    forwardmove: 10,
+                    sidemove: 20,
+                    upmove: 30,
+                    buttons: 1,
+                    impulse: 0,
+                }),
                 velocity: [10, 20, 30],
                 model_index: Some(2),
-                skin_num: None,
-                effects: None,
-                weapon_frame: None,
+                skin_num: Some(3),
+                effects: Some(4),
+                weapon_frame: Some(5),
             }),
             0,
         );
@@ -536,6 +574,11 @@ mod tests {
         assert_eq!(state.players[0].frame, 4);
         assert_eq!(state.players[0].velocity, [10, 20, 30]);
         assert_eq!(state.players[0].model_index, 2);
+        assert_eq!(state.players[0].msec, 12);
+        assert_eq!(state.players[0].cmd.forwardmove, 10);
+        assert_eq!(state.players[0].skin_num, 3);
+        assert_eq!(state.players[0].effects, 4);
+        assert_eq!(state.players[0].weapon_frame, 5);
     }
 
     #[test]
