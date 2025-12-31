@@ -77,7 +77,8 @@ pub fn worldspawn_wad_list(entities: &[Entity]) -> Vec<String> {
             let name = Path::new(trimmed)
                 .file_name()
                 .and_then(|value| value.to_str())
-                .unwrap_or(trimmed);
+                .unwrap_or_else(|| basename_any_sep(trimmed));
+            let name = basename_any_sep(name);
             if name.is_empty() {
                 None
             } else {
@@ -85,6 +86,12 @@ pub fn worldspawn_wad_list(entities: &[Entity]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn basename_any_sep(path: &str) -> &str {
+    path.rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(path)
 }
 
 #[cfg(test)]
