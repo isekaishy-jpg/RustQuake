@@ -1,8 +1,8 @@
 use qw_common::{
-    EntityState, Frame, InfoString, NailProjectile, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS,
-    MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, PacketEntities,
-    PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_MONSTERS, STAT_SECRETS,
-    UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
+    ClientDataMessage, EntityState, Frame, InfoString, NailProjectile, MAX_CL_STATS, MAX_CLIENTS,
+    MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
+    PacketEntities, PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_MONSTERS,
+    STAT_SECRETS, UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -74,6 +74,7 @@ pub struct ClientState {
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
+    pub client_data: Option<ClientDataMessage>,
     pub sound_events: Vec<qw_common::SoundMessage>,
     pub stop_sounds: Vec<StopSoundEvent>,
     pub muzzle_flashes: Vec<u16>,
@@ -115,6 +116,7 @@ impl ClientState {
             players,
             sounds: Vec::new(),
             models: Vec::new(),
+            client_data: None,
             sound_events: Vec::new(),
             stop_sounds: Vec::new(),
             muzzle_flashes: Vec::new(),
@@ -149,6 +151,7 @@ impl ClientState {
                 self.serverdata = Some(data.clone());
                 self.sounds.clear();
                 self.models.clear();
+                self.client_data = None;
                 self.next_sound = None;
                 self.next_model = None;
                 self.signon_num = None;
@@ -291,6 +294,9 @@ impl ClientState {
             }
             SvcMessage::SetAngle(angles) => {
                 self.view_angles = *angles;
+            }
+            SvcMessage::ClientData(data) => {
+                self.client_data = Some(data.clone());
             }
             SvcMessage::SignonNum(value) => {
                 self.signon_num = Some(*value);
@@ -971,6 +977,32 @@ mod tests {
         assert_eq!(state.signon_num, Some(2));
         assert_eq!(state.server_time, 12.5);
         assert!(state.paused);
+    }
+
+    #[test]
+    fn stores_clientdata_message() {
+        let mut state = ClientState::new();
+        let data = ClientDataMessage {
+            bits: qw_common::SU_ONGROUND,
+            view_height: 22,
+            ideal_pitch: 0,
+            punch_angle: Vec3::new(1.0, 0.0, 0.0),
+            velocity: Vec3::new(16.0, 0.0, 0.0),
+            items: 5,
+            onground: true,
+            inwater: false,
+            weapon_frame: 0,
+            armor: 0,
+            weapon: 0,
+            health: 100,
+            ammo: 10,
+            ammo_counts: [1, 2, 3, 4],
+            active_weapon: 1,
+        };
+
+        state.apply_message(&SvcMessage::ClientData(data.clone()), 0);
+
+        assert_eq!(state.client_data, Some(data));
     }
 
     #[test]

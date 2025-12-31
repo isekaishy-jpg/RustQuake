@@ -5,7 +5,10 @@ use crate::msg::{MsgReadError, MsgReader, SizeBuf, SizeBufError};
 use crate::protocol::{
     Svc, PF_COMMAND, PF_EFFECTS, PF_MSEC, PF_MODEL, PF_SKINNUM, PF_VELOCITY1, PF_VELOCITY2,
     PF_VELOCITY3, PF_WEAPONFRAME, DEFAULT_SOUND_PACKET_ATTENUATION,
-    DEFAULT_SOUND_PACKET_VOLUME, SND_ATTENUATION, SND_VOLUME, TE_BLOOD, TE_EXPLOSION,
+    DEFAULT_SOUND_PACKET_VOLUME, DEFAULT_VIEWHEIGHT, SND_ATTENUATION, SND_VOLUME, SU_ARMOR,
+    SU_IDEALPITCH, SU_INWATER, SU_ONGROUND, SU_PUNCH1, SU_PUNCH2, SU_PUNCH3,
+    SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT, SU_WEAPON, SU_WEAPONFRAME, TE_BLOOD,
+    TE_EXPLOSION,
     TE_GUNSHOT, TE_KNIGHTSPIKE, TE_LAVASPLASH, TE_LIGHTNING1, TE_LIGHTNING2, TE_LIGHTNING3,
     TE_LIGHTNINGBLOOD, TE_SPIKE, TE_SUPERSPIKE, TE_TAREXPLOSION, TE_TELEPORT, TE_WIZSPIKE,
     U_ANGLE1, U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS,
@@ -29,6 +32,7 @@ pub enum SvcMessage {
     UpdateName { slot: u8, name: String },
     SetView { entity: u16 },
     SetAngle(Vec3),
+    ClientData(ClientDataMessage),
     Damage { armor: u8, blood: u8, origin: Vec3 },
     SetPause(bool),
     SignonNum(u8),
@@ -131,6 +135,25 @@ pub struct TempEntityMessage {
     pub end: Option<Vec3>,
     pub count: Option<u8>,
     pub entity: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientDataMessage {
+    pub bits: u16,
+    pub view_height: i8,
+    pub ideal_pitch: i8,
+    pub punch_angle: Vec3,
+    pub velocity: Vec3,
+    pub items: i32,
+    pub onground: bool,
+    pub inwater: bool,
+    pub weapon_frame: u8,
+    pub armor: u8,
+    pub weapon: u8,
+    pub health: i16,
+    pub ammo: u8,
+    pub ammo_counts: [u8; 4],
+    pub active_weapon: u8,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -332,6 +355,79 @@ fn parse_sound(reader: &mut MsgReader) -> Result<SoundMessage, MsgReadError> {
     })
 }
 
+fn parse_clientdata(reader: &mut MsgReader) -> Result<ClientDataMessage, MsgReadError> {
+    let bits = reader.read_u16()?;
+    let view_height = if bits & SU_VIEWHEIGHT != 0 {
+        reader.read_i8()?
+    } else {
+        DEFAULT_VIEWHEIGHT
+    };
+    let ideal_pitch = if bits & SU_IDEALPITCH != 0 {
+        reader.read_i8()?
+    } else {
+        0
+    };
+
+    let punch_bits = [SU_PUNCH1, SU_PUNCH2, SU_PUNCH3];
+    let velocity_bits = [SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3];
+    let mut punch = [0.0; 3];
+    let mut velocity = [0.0; 3];
+    for i in 0..3 {
+        if bits & punch_bits[i] != 0 {
+            punch[i] = reader.read_i8()? as f32;
+        }
+        if bits & velocity_bits[i] != 0 {
+            velocity[i] = reader.read_i8()? as f32 * 16.0;
+        }
+    }
+
+    let items = reader.read_i32()?;
+    let onground = bits & SU_ONGROUND != 0;
+    let inwater = bits & SU_INWATER != 0;
+
+    let weapon_frame = if bits & SU_WEAPONFRAME != 0 {
+        reader.read_u8()?
+    } else {
+        0
+    };
+    let armor = if bits & SU_ARMOR != 0 {
+        reader.read_u8()?
+    } else {
+        0
+    };
+    let weapon = if bits & SU_WEAPON != 0 {
+        reader.read_u8()?
+    } else {
+        0
+    };
+
+    let health = reader.read_i16()?;
+    let ammo = reader.read_u8()?;
+    let mut ammo_counts = [0u8; 4];
+    for count in &mut ammo_counts {
+        *count = reader.read_u8()?;
+    }
+    let active_weapon = reader.read_u8()?;
+
+    Ok(ClientDataMessage {
+        bits,
+        view_height,
+        ideal_pitch,
+        punch_angle: Vec3::new(punch[0], punch[1], punch[2]),
+        velocity: Vec3::new(velocity[0], velocity[1], velocity[2]),
+        items,
+        onground,
+        inwater,
+        weapon_frame,
+        armor,
+        weapon,
+        health,
+        ammo,
+        ammo_counts,
+        active_weapon,
+    })
+}
+
 fn decode_nail_projectile(bits: [u8; 6]) -> NailProjectile {
     let packed_x = (bits[0] as i32) + (((bits[1] & 0x0f) as i32) << 8);
     let packed_y = ((bits[1] >> 4) as i32) + ((bits[2] as i32) << 4);
@@ -382,6 +478,68 @@ fn encode_nail_projectile(projectile: &NailProjectile) -> [u8; 6] {
     let b5 = yaw;
 
     [b0, b1, b2, b3, b4, b5]
+}
+
+fn quantize_clientdata_i8(value: f32) -> i8 {
+    value.round().clamp(-128.0, 127.0) as i8
+}
+
+fn quantize_clientdata_velocity(value: f32) -> i8 {
+    (value / 16.0).round().clamp(-128.0, 127.0) as i8
+}
+
+fn write_clientdata(buf: &mut SizeBuf, data: &ClientDataMessage) -> Result<(), SizeBufError> {
+    let mut bits = data.bits;
+    if data.onground {
+        bits |= SU_ONGROUND;
+    } else {
+        bits &= !SU_ONGROUND;
+    }
+    if data.inwater {
+        bits |= SU_INWATER;
+    } else {
+        bits &= !SU_INWATER;
+    }
+
+    buf.write_u16(bits)?;
+    if bits & SU_VIEWHEIGHT != 0 {
+        buf.write_i8(data.view_height)?;
+    }
+    if bits & SU_IDEALPITCH != 0 {
+        buf.write_i8(data.ideal_pitch)?;
+    }
+
+    let punch_bits = [SU_PUNCH1, SU_PUNCH2, SU_PUNCH3];
+    let velocity_bits = [SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3];
+    let punch = [data.punch_angle.x, data.punch_angle.y, data.punch_angle.z];
+    let velocity = [data.velocity.x, data.velocity.y, data.velocity.z];
+    for i in 0..3 {
+        if bits & punch_bits[i] != 0 {
+            buf.write_i8(quantize_clientdata_i8(punch[i]))?;
+        }
+        if bits & velocity_bits[i] != 0 {
+            buf.write_i8(quantize_clientdata_velocity(velocity[i]))?;
+        }
+    }
+
+    buf.write_i32(data.items)?;
+    if bits & SU_WEAPONFRAME != 0 {
+        buf.write_u8(data.weapon_frame)?;
+    }
+    if bits & SU_ARMOR != 0 {
+        buf.write_u8(data.armor)?;
+    }
+    if bits & SU_WEAPON != 0 {
+        buf.write_u8(data.weapon)?;
+    }
+
+    buf.write_i16(data.health)?;
+    buf.write_u8(data.ammo)?;
+    for count in data.ammo_counts {
+        buf.write_u8(count)?;
+    }
+    buf.write_u8(data.active_weapon)?;
+    Ok(())
 }
 
 fn parse_entity_delta(reader: &mut MsgReader, word: u16) -> Result<EntityDelta, MsgReadError> {
@@ -780,7 +938,7 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
         Svc::Particle => Ok(SvcMessage::Particle(parse_particle(reader)?)),
         Svc::TempEntity => Ok(SvcMessage::TempEntity(parse_temp_entity(reader)?)),
         Svc::Sound => Ok(SvcMessage::Sound(parse_sound(reader)?)),
-        Svc::ClientData => Err(SvcParseError::UnsupportedSvc(Svc::ClientData)),
+        Svc::ClientData => Ok(SvcMessage::ClientData(parse_clientdata(reader)?)),
         Svc::StopSound => {
             let field = reader.read_u16()?;
             let entity = ((field >> 3) & 1023) as u16;
@@ -1003,6 +1161,10 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             buf.write_angle(angles.x)?;
             buf.write_angle(angles.y)?;
             buf.write_angle(angles.z)?;
+        }
+        SvcMessage::ClientData(data) => {
+            buf.write_u8(Svc::ClientData as u8)?;
+            write_clientdata(buf, data)?;
         }
         SvcMessage::Damage {
             armor,
@@ -1440,6 +1602,40 @@ mod tests {
                 quantize_angle8(3.0)
             ))
         );
+    }
+
+    #[test]
+    fn parses_clientdata() {
+        let data = ClientDataMessage {
+            bits: SU_VIEWHEIGHT
+                | SU_IDEALPITCH
+                | SU_PUNCH1
+                | SU_VELOCITY1
+                | SU_ONGROUND
+                | SU_WEAPONFRAME
+                | SU_ARMOR
+                | SU_WEAPON,
+            view_height: 20,
+            ideal_pitch: -5,
+            punch_angle: Vec3::new(4.0, 0.0, 0.0),
+            velocity: Vec3::new(32.0, 0.0, 0.0),
+            items: 123,
+            onground: true,
+            inwater: false,
+            weapon_frame: 2,
+            armor: 50,
+            weapon: 3,
+            health: 75,
+            ammo: 4,
+            ammo_counts: [5, 6, 7, 8],
+            active_weapon: 2,
+        };
+        let mut buf = SizeBuf::new(128);
+        write_svc_message(&mut buf, &SvcMessage::ClientData(data.clone())).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let msg = parse_svc_message(&mut reader).unwrap();
+        assert_eq!(msg, SvcMessage::ClientData(data));
     }
 
     #[test]
