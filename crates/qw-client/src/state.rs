@@ -1,8 +1,10 @@
 use qw_common::{
     ClientDataMessage, EntityState, Frame, InfoString, NailProjectile, MAX_CL_STATS, MAX_CLIENTS,
     MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
-    PacketEntities, PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_MONSTERS,
-    STAT_SECRETS, UPDATE_BACKUP, UPDATE_MASK, UserCmd, Vec3,
+    PacketEntities, PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_ACTIVEWEAPON,
+    STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS,
+    STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, UPDATE_BACKUP, UPDATE_MASK, UserCmd,
+    Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -297,6 +299,16 @@ impl ClientState {
             }
             SvcMessage::ClientData(data) => {
                 self.client_data = Some(data.clone());
+                self.stats[STAT_HEALTH] = data.health as i32;
+                self.stats[STAT_WEAPON] = data.weapon as i32;
+                self.stats[STAT_ARMOR] = data.armor as i32;
+                self.stats[STAT_AMMO] = data.ammo as i32;
+                self.stats[STAT_SHELLS] = data.ammo_counts[0] as i32;
+                self.stats[STAT_NAILS] = data.ammo_counts[1] as i32;
+                self.stats[STAT_ROCKETS] = data.ammo_counts[2] as i32;
+                self.stats[STAT_CELLS] = data.ammo_counts[3] as i32;
+                self.stats[STAT_ACTIVEWEAPON] = data.active_weapon as i32;
+                self.stats[STAT_ITEMS] = data.items;
             }
             SvcMessage::SignonNum(value) => {
                 self.signon_num = Some(*value);
@@ -1003,6 +1015,16 @@ mod tests {
         state.apply_message(&SvcMessage::ClientData(data.clone()), 0);
 
         assert_eq!(state.client_data, Some(data));
+        assert_eq!(state.stats[STAT_HEALTH], 100);
+        assert_eq!(state.stats[STAT_WEAPON], 0);
+        assert_eq!(state.stats[STAT_ARMOR], 0);
+        assert_eq!(state.stats[STAT_AMMO], 10);
+        assert_eq!(state.stats[STAT_SHELLS], 1);
+        assert_eq!(state.stats[STAT_NAILS], 2);
+        assert_eq!(state.stats[STAT_ROCKETS], 3);
+        assert_eq!(state.stats[STAT_CELLS], 4);
+        assert_eq!(state.stats[STAT_ACTIVEWEAPON], 1);
+        assert_eq!(state.stats[STAT_ITEMS], 5);
     }
 
     #[test]
