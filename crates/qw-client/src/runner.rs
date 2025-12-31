@@ -135,6 +135,17 @@ impl ClientRunner {
             let ack_index = (incoming_ack as usize) & UPDATE_MASK;
             self.state.frames[ack_index].receivedtime = now;
             self.state.parsecount_time = Some(self.state.frames[ack_index].senttime);
+            let senttime = self.state.frames[ack_index].senttime;
+            if senttime > 0.0 {
+                let latency = now - senttime;
+                if (0.0..=1.0).contains(&latency) {
+                    if latency < self.state.latency {
+                        self.state.latency = latency;
+                    } else {
+                        self.state.latency += 0.001;
+                    }
+                }
+            }
             for message in messages {
                 if let SvcMessage::ChokeCount(count) = message {
                     self.state.mark_choked(*count, incoming_ack);
@@ -147,8 +158,9 @@ impl ClientRunner {
                 self.maybe_queue_skin_downloads(message)?;
             }
             let outgoing_sequence = self.client.netchan.outgoing_sequence();
+            let sim_time = (now - self.state.latency).clamp(0.0, now);
             self.state
-                .predict_move(incoming_sequence, outgoing_sequence, now);
+                .predict_move(incoming_sequence, outgoing_sequence, sim_time);
         }
 
         Ok(Some(parsed))

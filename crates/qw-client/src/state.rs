@@ -98,6 +98,7 @@ pub struct ClientState {
     pub sim_angles: Vec3,
     pub server_version: Option<i32>,
     pub parsecount_time: Option<f64>,
+    pub latency: f64,
     pub stats: [i32; MAX_CL_STATS],
     pub lightstyles: Vec<String>,
     pub baselines: Vec<EntityState>,
@@ -154,6 +155,7 @@ impl ClientState {
             sim_angles: Vec3::default(),
             server_version: None,
             parsecount_time: None,
+            latency: 0.0,
             stats: [0; MAX_CL_STATS],
             lightstyles: vec![String::new(); MAX_LIGHTSTYLES],
             baselines,
@@ -196,6 +198,7 @@ impl ClientState {
                 self.sim_angles = Vec3::default();
                 self.server_time = 0.0;
                 self.parsecount_time = None;
+                self.latency = 0.0;
                 self.paused = false;
                 self.next_sound = None;
                 self.next_model = None;
