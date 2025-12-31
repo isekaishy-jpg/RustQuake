@@ -2,6 +2,7 @@ mod client;
 mod config;
 mod handshake;
 mod net;
+mod prediction;
 mod runner;
 mod session;
 mod state;
