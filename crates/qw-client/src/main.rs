@@ -226,7 +226,8 @@ fn run() -> Result<(), AppError> {
         if audio.is_running() {
             renderer.set_view(build_render_view(&runner.state));
             let incoming = runner.client.netchan.incoming_sequence();
-            renderer.set_entities(build_render_entities(&runner.state, incoming));
+            let render_time = runner.time_seconds() - runner.state.latency;
+            renderer.set_entities(build_render_entities(&runner.state, incoming, render_time));
             renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
             renderer.end_frame();
@@ -412,18 +413,32 @@ fn build_render_view(state: &ClientState) -> RenderView {
     }
 }
 
-fn build_render_entities(state: &ClientState, incoming_sequence: u32) -> Vec<RenderEntity> {
+fn build_render_entities(
+    state: &ClientState,
+    incoming_sequence: u32,
+    render_time: f64,
+) -> Vec<RenderEntity> {
     let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
+    let prev_index = (incoming_sequence.wrapping_sub(1) as usize) & UPDATE_MASK;
     let frame = &state.frames[frame_index];
+    let prev_frame = &state.frames[prev_index];
+    let frac = interpolation_fraction(render_time, prev_frame.receivedtime, frame.receivedtime);
     let mut entities = Vec::new();
+
+    let mut prev_lookup = std::collections::HashMap::new();
+    let prev_count = prev_frame.packet_entities.num_entities;
+    for ent in prev_frame.packet_entities.entities.iter().take(prev_count) {
+        prev_lookup.insert(ent.number, *ent);
+    }
 
     let entity_count = frame.packet_entities.num_entities;
     for ent in frame.packet_entities.entities.iter().take(entity_count) {
-        push_render_entity(&mut entities, &state.models, ent);
+        let prev = prev_lookup.get(&ent.number);
+        push_render_entity(&mut entities, &state.models, ent, prev, frac);
     }
 
     for ent in &state.static_entities {
-        push_render_entity(&mut entities, &state.models, ent);
+        push_render_entity(&mut entities, &state.models, ent, None, 1.0);
     }
 
     entities
@@ -433,6 +448,8 @@ fn push_render_entity(
     entities: &mut Vec<RenderEntity>,
     models: &[String],
     ent: &qw_common::EntityState,
+    prev: Option<&qw_common::EntityState>,
+    frac: f32,
 ) {
     if ent.modelindex <= 0 {
         return;
@@ -442,11 +459,20 @@ fn push_render_entity(
         return;
     };
     let kind = model_kind_from_name(name);
+    let origin = match prev {
+        Some(previous) => lerp_vec3(previous.origin, ent.origin, frac),
+        None => ent.origin,
+    };
+    let angles = match prev {
+        Some(previous) => lerp_vec3(previous.angles, ent.angles, frac),
+        None => ent.angles,
+    };
+
     entities.push(RenderEntity {
         kind,
         model_index,
-        origin: ent.origin,
-        angles: ent.angles,
+        origin,
+        angles,
         frame: ent.frame.max(0) as u32,
         skin: ent.skinnum.max(0) as u32,
         alpha: 1.0,
@@ -461,6 +487,22 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
     } else {
         RenderEntityKind::Alias
     }
+}
+
+fn interpolation_fraction(now: f64, previous: f64, current: f64) -> f32 {
+    if previous < 0.0 || current <= previous {
+        return 1.0;
+    }
+    let frac = ((now - previous) / (current - previous)).clamp(0.0, 1.0);
+    frac as f32
+}
+
+fn lerp_vec3(from: qw_common::Vec3, to: qw_common::Vec3, frac: f32) -> qw_common::Vec3 {
+    qw_common::Vec3::new(
+        from.x + (to.x - from.x) * frac,
+        from.y + (to.y - from.y) * frac,
+        from.z + (to.z - from.z) * frac,
+    )
 }
 
 fn angle_vectors(angles: qw_common::Vec3) -> (qw_common::Vec3, qw_common::Vec3, qw_common::Vec3) {

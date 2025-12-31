@@ -126,6 +126,10 @@ impl ClientRunner {
         Ok(())
     }
 
+    pub fn time_seconds(&self) -> f64 {
+        self.start_time.elapsed().as_secs_f64()
+    }
+
     pub fn poll_once(&mut self, buf: &mut [u8]) -> Result<Option<ClientPacket>, RunnerError> {
         let Some((size, _)) = self.net.recv(buf)? else {
             return Ok(None);
