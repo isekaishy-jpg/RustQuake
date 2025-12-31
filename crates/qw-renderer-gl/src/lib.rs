@@ -1,4 +1,4 @@
-use qw_common::{BspRender, FaceVertex, Palette, Vec3};
+use qw_common::{AliasModel, BspRender, FaceVertex, Palette, Sprite, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -133,6 +133,25 @@ pub struct RenderDrawList {
     pub transparent_surfaces: Vec<usize>,
     pub opaque_entities: Vec<RenderEntity>,
     pub transparent_entities: Vec<RenderEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderModelTexture {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderModelKind {
+    Alias(AliasModel),
+    Sprite(Sprite),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderModel {
+    pub kind: RenderModelKind,
+    pub textures: Vec<RenderModelTexture>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -287,6 +306,7 @@ pub struct GlRenderer {
     last_view: Option<RenderView>,
     last_world: Option<RenderWorld>,
     entities: Vec<RenderEntity>,
+    models: Vec<Option<RenderModel>>,
     gpu_world: Option<GpuWorld>,
     ui: UiLayer,
 }
@@ -299,6 +319,7 @@ impl GlRenderer {
             last_view: None,
             last_world: None,
             entities: Vec::new(),
+            models: Vec::new(),
             gpu_world: None,
             ui: UiLayer::default(),
         }
@@ -327,6 +348,14 @@ impl GlRenderer {
 
     pub fn set_entities(&mut self, entities: Vec<RenderEntity>) {
         self.entities = entities;
+    }
+
+    pub fn set_models(&mut self, models: Vec<Option<RenderModel>>) {
+        self.models = models;
+    }
+
+    pub fn models(&self) -> &[Option<RenderModel>] {
+        &self.models
     }
 
     pub fn draw_list(&self) -> Option<RenderDrawList> {
@@ -639,6 +668,7 @@ fn style_value(lightstyles: &[String], style_id: u8, time: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qw_common::SpriteHeader;
 
     #[test]
     fn resizes_to_nonzero_dimensions() {
@@ -686,6 +716,33 @@ mod tests {
         );
         renderer.set_world(world.clone());
         assert_eq!(renderer.world(), Some(&world));
+    }
+
+    #[test]
+    fn stores_model_state() {
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let sprite = Sprite {
+            header: SpriteHeader {
+                sprite_type: 0,
+                bounding_radius: 0.0,
+                width: 1,
+                height: 1,
+                num_frames: 0,
+                beam_length: 0.0,
+                sync_type: 0,
+            },
+            frames: Vec::new(),
+        };
+        let models = vec![Some(RenderModel {
+            kind: RenderModelKind::Sprite(sprite),
+            textures: vec![RenderModelTexture {
+                width: 1,
+                height: 1,
+                rgba: vec![0, 0, 0, 255],
+            }],
+        })];
+        renderer.set_models(models.clone());
+        assert_eq!(renderer.models(), &models);
     }
 
     #[test]

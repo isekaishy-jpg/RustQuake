@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 use crate::client::{Client, ClientPacket};
-use crate::model_cache::{ModelCache, ModelCacheError};
+use crate::model_cache::{ModelAsset, ModelCache, ModelCacheError};
 use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
@@ -124,6 +124,10 @@ impl ClientRunner {
         let packet = self.session.start();
         self.net.send(&packet)?;
         Ok(())
+    }
+
+    pub fn model_assets(&self) -> &[Option<ModelAsset>] {
+        self.model_cache.models()
     }
 
     pub fn time_seconds(&self) -> f64 {

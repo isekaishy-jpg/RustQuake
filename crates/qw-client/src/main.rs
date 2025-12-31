@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use crate::cli::{CliAction, ClientMode, DEFAULT_QPORT};
 use crate::config::ClientConfig;
 use crate::input::{CommandTarget, InputBindings, InputState};
+use crate::model_cache::{ModelAsset, ModelKind};
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
@@ -28,8 +29,8 @@ use qw_common::{
     InfoError, InfoString, STAT_AMMO, STAT_ARMOR, STAT_HEALTH, UPDATE_MASK, value_for_key,
 };
 use qw_renderer_gl::{
-    GlRenderer, RenderEntity, RenderEntityKind, RenderView, RenderWorld, Renderer, RendererConfig,
-    UiLayer, UiText,
+    GlRenderer, RenderEntity, RenderEntityKind, RenderModel, RenderModelKind, RenderModelTexture,
+    RenderView, RenderWorld, Renderer, RendererConfig, UiLayer, UiText,
 };
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
@@ -108,6 +109,7 @@ fn run() -> Result<(), AppError> {
     let mut last_move = Instant::now();
     let mut last_title: Option<String> = None;
     let mut last_world: Option<String> = None;
+    let mut last_model_count: usize = 0;
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
     let mut pending_server_cmds: VecDeque<String> = VecDeque::new();
@@ -171,6 +173,11 @@ fn run() -> Result<(), AppError> {
             }
         }
         update_render_world(&mut renderer, &runner.state, &mut last_world);
+        let model_assets = runner.model_assets();
+        if model_assets.len() != last_model_count {
+            renderer.set_models(build_render_models(model_assets));
+            last_model_count = model_assets.len();
+        }
         let (_, right, _) = angle_vectors(runner.state.sim_angles);
         audio.set_listener(
             [
@@ -493,6 +500,30 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
     }
 }
 
+fn build_render_models(models: &[Option<ModelAsset>]) -> Vec<Option<RenderModel>> {
+    models
+        .iter()
+        .map(|model| {
+            model.as_ref().map(|asset| {
+                let kind = match &asset.kind {
+                    ModelKind::Alias(model) => RenderModelKind::Alias(model.clone()),
+                    ModelKind::Sprite(sprite) => RenderModelKind::Sprite(sprite.clone()),
+                };
+                let textures = asset
+                    .textures
+                    .iter()
+                    .map(|texture| RenderModelTexture {
+                        width: texture.width,
+                        height: texture.height,
+                        rgba: texture.rgba.clone(),
+                    })
+                    .collect();
+                RenderModel { kind, textures }
+            })
+        })
+        .collect()
+}
+
 fn build_ui_layer(state: &ClientState, show_scores: bool) -> UiLayer {
     let mut texts = Vec::new();
     if state.render_world.is_none() {
@@ -732,5 +763,41 @@ mod tests {
         update_render_world(&mut renderer, &state, &mut last_world);
         assert_eq!(last_world.as_deref(), Some("maps/start.bsp"));
         assert!(renderer.world().is_some());
+    }
+
+    #[test]
+    fn builds_render_models_from_assets() {
+        let sprite = qw_common::Sprite {
+            header: qw_common::SpriteHeader {
+                sprite_type: 0,
+                bounding_radius: 0.0,
+                width: 1,
+                height: 1,
+                num_frames: 0,
+                beam_length: 0.0,
+                sync_type: 0,
+            },
+            frames: Vec::new(),
+        };
+        let asset = ModelAsset {
+            kind: ModelKind::Sprite(sprite.clone()),
+            textures: vec![crate::model_cache::ModelTexture {
+                width: 1,
+                height: 1,
+                rgba: vec![1, 2, 3, 4],
+            }],
+        };
+
+        let models = build_render_models(&[Some(asset), None]);
+        assert_eq!(models.len(), 2);
+        let first = models[0].as_ref().unwrap();
+        match &first.kind {
+            RenderModelKind::Sprite(sprite_model) => {
+                assert_eq!(sprite_model.header.width, 1);
+            }
+            _ => panic!("expected sprite model"),
+        }
+        assert_eq!(first.textures[0].rgba, vec![1, 2, 3, 4]);
+        assert!(models[1].is_none());
     }
 }
