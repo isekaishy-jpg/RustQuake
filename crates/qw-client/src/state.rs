@@ -596,8 +596,12 @@ impl ClientState {
         let player_num = data.player_num as usize;
         let spectator = data.spectator;
         let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
-        let physents =
-            self.build_physents(&self.frames[frame_index], incoming_sequence, player_num);
+        let physents = self.build_physents(
+            &self.frames[frame_index],
+            incoming_sequence,
+            player_num,
+            now,
+        );
         let mut from_seq = incoming_sequence;
         let mut from_state = self.frames[frame_index].playerstate[player_num];
         let mut to_state = None;
@@ -731,6 +735,7 @@ impl ClientState {
         frame: &Frame,
         incoming_sequence: u32,
         player_num: usize,
+        playertime: f64,
     ) -> Vec<PhysEnt> {
         let base_physents = self.build_base_physents(frame);
         let mut physents = base_physents.clone();
@@ -739,7 +744,6 @@ impl ClientState {
         let player_maxs = Vec3::new(16.0, 16.0, 32.0);
 
         let sequence = incoming_sequence as i32;
-        let playertime = self.server_time as f64;
         for (index, state) in frame.playerstate.iter().enumerate() {
             if index == player_num || state.messagenum != sequence || state.modelindex == 0 {
                 continue;
