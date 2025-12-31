@@ -36,6 +36,14 @@ impl PlayerInfo {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticSound {
+    pub origin: Vec3,
+    pub sound: u8,
+    pub volume: u8,
+    pub attenuation: u8,
+}
+
 #[derive(Debug)]
 pub struct ClientState {
     pub serverinfo: InfoString,
@@ -56,6 +64,12 @@ pub struct ClientState {
     pub signon_num: Option<u8>,
     pub particle_effects: Vec<qw_common::ParticleEffect>,
     pub temp_entities: Vec<qw_common::TempEntityMessage>,
+    pub static_entities: Vec<EntityState>,
+    pub static_sounds: Vec<StaticSound>,
+    pub intermission: Option<(Vec3, Vec3)>,
+    pub finale: Option<String>,
+    pub show_sellscreen: bool,
+    pub kick_angle: f32,
     pub paused: bool,
 }
 
@@ -86,6 +100,12 @@ impl ClientState {
             signon_num: None,
             particle_effects: Vec::new(),
             temp_entities: Vec::new(),
+            static_entities: Vec::new(),
+            static_sounds: Vec::new(),
+            intermission: None,
+            finale: None,
+            show_sellscreen: false,
+            kick_angle: 0.0,
             paused: false,
         }
     }
@@ -101,6 +121,12 @@ impl ClientState {
                 self.signon_num = None;
                 self.particle_effects.clear();
                 self.temp_entities.clear();
+                self.static_entities.clear();
+                self.static_sounds.clear();
+                self.intermission = None;
+                self.finale = None;
+                self.show_sellscreen = false;
+                self.kick_angle = 0.0;
             }
             SvcMessage::Time(value) => {
                 self.server_time = *value;
@@ -185,6 +211,37 @@ impl ClientState {
             }
             SvcMessage::SetPause(paused) => {
                 self.paused = *paused;
+            }
+            SvcMessage::SpawnStatic(entity) => {
+                self.static_entities.push(*entity);
+            }
+            SvcMessage::SpawnStaticSound {
+                origin,
+                sound,
+                volume,
+                attenuation,
+            } => {
+                self.static_sounds.push(StaticSound {
+                    origin: *origin,
+                    sound: *sound,
+                    volume: *volume,
+                    attenuation: *attenuation,
+                });
+            }
+            SvcMessage::Intermission { origin, angles } => {
+                self.intermission = Some((*origin, *angles));
+            }
+            SvcMessage::Finale(text) => {
+                self.finale = Some(text.clone());
+            }
+            SvcMessage::SellScreen => {
+                self.show_sellscreen = true;
+            }
+            SvcMessage::SmallKick => {
+                self.kick_angle = -2.0;
+            }
+            SvcMessage::BigKick => {
+                self.kick_angle = -4.0;
             }
             SvcMessage::LightStyle { style, value } => {
                 let index = *style as usize;
@@ -788,6 +845,60 @@ mod tests {
 
         assert_eq!(state.temp_entities, vec![temp]);
         assert_eq!(state.particle_effects, vec![particle]);
+    }
+
+    #[test]
+    fn applies_static_and_end_state_messages() {
+        let mut state = ClientState::new();
+        let entity = EntityState {
+            number: 0,
+            flags: 0,
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            angles: Vec3::new(4.0, 5.0, 6.0),
+            modelindex: 1,
+            frame: 0,
+            colormap: 0,
+            skinnum: 0,
+            effects: 0,
+        };
+        state.apply_message(&SvcMessage::SpawnStatic(entity), 0);
+        state.apply_message(
+            &SvcMessage::SpawnStaticSound {
+                origin: Vec3::new(7.0, 8.0, 9.0),
+                sound: 3,
+                volume: 200,
+                attenuation: 64,
+            },
+            0,
+        );
+        state.apply_message(
+            &SvcMessage::Intermission {
+                origin: Vec3::new(10.0, 11.0, 12.0),
+                angles: Vec3::new(13.0, 14.0, 15.0),
+            },
+            0,
+        );
+        state.apply_message(&SvcMessage::Finale("end".to_string()), 0);
+        state.apply_message(&SvcMessage::SellScreen, 0);
+        state.apply_message(&SvcMessage::SmallKick, 0);
+
+        assert_eq!(state.static_entities, vec![entity]);
+        assert_eq!(
+            state.static_sounds,
+            vec![StaticSound {
+                origin: Vec3::new(7.0, 8.0, 9.0),
+                sound: 3,
+                volume: 200,
+                attenuation: 64,
+            }]
+        );
+        assert_eq!(
+            state.intermission,
+            Some((Vec3::new(10.0, 11.0, 12.0), Vec3::new(13.0, 14.0, 15.0)))
+        );
+        assert_eq!(state.finale, Some("end".to_string()));
+        assert!(state.show_sellscreen);
+        assert_eq!(state.kick_angle, -2.0);
     }
 
     #[test]
