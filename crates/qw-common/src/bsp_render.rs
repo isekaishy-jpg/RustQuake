@@ -35,6 +35,12 @@ pub struct Face {
     pub light_ofs: i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceVertex {
+    pub position: Vec3,
+    pub tex_coords: [f32; 2],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BspRender {
     pub vertices: Vec<Vec3>,
@@ -57,6 +63,41 @@ impl BspRender {
             textures: parse_textures(bsp.lump_slice(LUMP_TEXTURES)?)?,
             lighting: bsp.lump_slice(LUMP_LIGHTING)?.to_vec(),
         })
+    }
+
+    pub fn face_vertices(&self, face_index: usize) -> Option<Vec<FaceVertex>> {
+        let face = self.faces.get(face_index)?;
+        let texinfo = self.texinfo.get(face.texinfo as usize)?;
+        let first_edge = face.first_edge;
+        if first_edge < 0 {
+            return None;
+        }
+        let first_edge = first_edge as usize;
+        let num_edges = face.num_edges as usize;
+        if first_edge + num_edges > self.surf_edges.len() {
+            return None;
+        }
+
+        let mut vertices = Vec::with_capacity(num_edges);
+        for surf_edge in &self.surf_edges[first_edge..first_edge + num_edges] {
+            let edge_index = *surf_edge;
+            let vert_index = if edge_index >= 0 {
+                let edge = self.edges.get(edge_index as usize)?;
+                edge[0]
+            } else {
+                let edge = self.edges.get((-edge_index) as usize)?;
+                edge[1]
+            };
+            let position = *self.vertices.get(vert_index as usize)?;
+            let s = position.dot(texinfo.s_vec) + texinfo.s_offset;
+            let t = position.dot(texinfo.t_vec) + texinfo.t_offset;
+            vertices.push(FaceVertex {
+                position,
+                tex_coords: [s, t],
+            });
+        }
+
+        Some(vertices)
     }
 }
 
@@ -284,5 +325,44 @@ mod tests {
         assert_eq!(render.textures[0].name, "wall");
         assert_eq!(render.textures[0].width, 64);
         assert_eq!(render.textures[0].height, 32);
+    }
+
+    #[test]
+    fn builds_face_vertices() {
+        let render = BspRender {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
+            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            surf_edges: vec![0, 1, 2, 3],
+            texinfo: vec![TexInfo {
+                s_vec: Vec3::new(1.0, 0.0, 0.0),
+                s_offset: 0.0,
+                t_vec: Vec3::new(0.0, 1.0, 0.0),
+                t_offset: 0.0,
+                texture_id: 0,
+                flags: 0,
+            }],
+            faces: vec![Face {
+                plane_num: 0,
+                side: 0,
+                first_edge: 0,
+                num_edges: 4,
+                texinfo: 0,
+                styles: [0; 4],
+                light_ofs: 0,
+            }],
+            textures: Vec::new(),
+            lighting: Vec::new(),
+        };
+
+        let verts = render.face_vertices(0).unwrap();
+        assert_eq!(verts.len(), 4);
+        assert_eq!(verts[0].position, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(verts[2].position, Vec3::new(1.0, 1.0, 0.0));
+        assert_eq!(verts[3].tex_coords, [0.0, 1.0]);
     }
 }
