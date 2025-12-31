@@ -106,6 +106,7 @@ pub struct ClientState {
     pub kick_angle: f32,
     pub paused: bool,
     pub disconnected: bool,
+    pub cd_track: Option<u8>,
 }
 
 impl ClientState {
@@ -152,6 +153,7 @@ impl ClientState {
             kick_angle: 0.0,
             paused: false,
             disconnected: false,
+            cd_track: None,
         }
     }
 
@@ -186,6 +188,7 @@ impl ClientState {
                 self.show_sellscreen = false;
                 self.kick_angle = 0.0;
                 self.disconnected = false;
+                self.cd_track = None;
             }
             SvcMessage::Disconnect => {
                 self.disconnected = true;
@@ -370,6 +373,9 @@ impl ClientState {
             }
             SvcMessage::SellScreen => {
                 self.show_sellscreen = true;
+            }
+            SvcMessage::CdTrack(track) => {
+                self.cd_track = Some(*track);
             }
             SvcMessage::SmallKick => {
                 self.kick_angle = -2.0;
@@ -1309,6 +1315,7 @@ mod tests {
             0,
         );
         state.apply_message(&SvcMessage::Finale("end".to_string()), 0);
+        state.apply_message(&SvcMessage::CdTrack(3), 0);
         state.apply_message(&SvcMessage::SellScreen, 0);
         state.apply_message(&SvcMessage::SmallKick, 0);
 
@@ -1327,6 +1334,7 @@ mod tests {
             Some((Vec3::new(10.0, 11.0, 12.0), Vec3::new(13.0, 14.0, 15.0)))
         );
         assert_eq!(state.finale, Some("end".to_string()));
+        assert_eq!(state.cd_track, Some(3));
         assert!(state.show_sellscreen);
         assert_eq!(state.kick_angle, -2.0);
     }
