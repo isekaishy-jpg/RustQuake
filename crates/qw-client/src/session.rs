@@ -1,6 +1,6 @@
 use qw_common::OobMessage;
 
-use crate::handshake::{build_connect, build_getchallenge, parse_challenge, ConnectRequest};
+use crate::handshake::{ConnectRequest, build_connect, build_getchallenge, parse_challenge};
 use qw_common::InfoString;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -60,7 +60,9 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qw_common::{parse_oob_message, out_of_band_payload, S2C_CHALLENGE, S2C_CONNECTION, build_out_of_band};
+    use qw_common::{
+        S2C_CHALLENGE, S2C_CONNECTION, build_out_of_band, out_of_band_payload, parse_oob_message,
+    };
 
     #[test]
     fn handshake_flow() {
@@ -74,7 +76,11 @@ mod tests {
         let msg = parse_oob_message(payload).unwrap();
         let connect_packet = session.handle_oob(&msg).unwrap();
         assert_eq!(session.state, SessionState::ConnectSent);
-        assert!(out_of_band_payload(&connect_packet).unwrap().starts_with(b"connect"));
+        assert!(
+            out_of_band_payload(&connect_packet)
+                .unwrap()
+                .starts_with(b"connect")
+        );
 
         let conn_packet = build_out_of_band(&[S2C_CONNECTION, 0]);
         let payload = out_of_band_payload(&conn_packet).unwrap();

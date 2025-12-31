@@ -1,9 +1,9 @@
 use qw_common::{
-    ClientDataMessage, EntityState, Frame, InfoString, NailProjectile, MAX_CL_STATS, MAX_CLIENTS,
-    MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
-    PacketEntities, PacketEntitiesUpdate, ServerData, StringListChunk, SvcMessage, STAT_ACTIVEWEAPON,
-    STAT_AMMO, STAT_ARMOR, STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS,
-    STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS, STAT_WEAPON, UPDATE_BACKUP, UPDATE_MASK, UserCmd,
+    ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS,
+    MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, NailProjectile,
+    PacketEntities, PacketEntitiesUpdate, STAT_ACTIVEWEAPON, STAT_AMMO, STAT_ARMOR, STAT_CELLS,
+    STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS, STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS,
+    STAT_WEAPON, ServerData, StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd,
     Vec3,
 };
 
@@ -315,11 +315,19 @@ impl ClientState {
             }
             SvcMessage::SoundList(chunk) => {
                 apply_string_list(&mut self.sounds, chunk);
-                self.next_sound = if chunk.next == 0 { None } else { Some(chunk.next) };
+                self.next_sound = if chunk.next == 0 {
+                    None
+                } else {
+                    Some(chunk.next)
+                };
             }
             SvcMessage::ModelList(chunk) => {
                 apply_string_list(&mut self.models, chunk);
-                self.next_model = if chunk.next == 0 { None } else { Some(chunk.next) };
+                self.next_model = if chunk.next == 0 {
+                    None
+                } else {
+                    Some(chunk.next)
+                };
             }
             SvcMessage::SetView { entity } => {
                 self.view_entity = Some(*entity);
@@ -651,7 +659,12 @@ mod tests {
             0,
         );
         assert_eq!(state.players[1].user_id, 99);
-        assert!(state.players[1].userinfo.as_str().contains("\\name\\player"));
+        assert!(
+            state.players[1]
+                .userinfo
+                .as_str()
+                .contains("\\name\\player")
+        );
     }
 
     #[test]
@@ -941,14 +954,8 @@ mod tests {
     #[test]
     fn applies_scoreboard_updates() {
         let mut state = ClientState::new();
-        state.apply_message(
-            &SvcMessage::UpdateFrags { slot: 0, frags: 5 },
-            0,
-        );
-        state.apply_message(
-            &SvcMessage::UpdatePing { slot: 0, ping: 50 },
-            0,
-        );
+        state.apply_message(&SvcMessage::UpdateFrags { slot: 0, frags: 5 }, 0);
+        state.apply_message(&SvcMessage::UpdatePing { slot: 0, ping: 50 }, 0);
         state.apply_message(
             &SvcMessage::UpdatePl {
                 slot: 0,
@@ -1231,7 +1238,10 @@ mod tests {
             attenuation: 1.0,
             origin: Vec3::new(0.0, 0.0, 0.0),
         });
-        state.stop_sounds.push(StopSoundEvent { entity: 2, channel: 1 });
+        state.stop_sounds.push(StopSoundEvent {
+            entity: 2,
+            channel: 1,
+        });
         state.muzzle_flashes.push(3);
         state.damage_events.push(DamageEvent {
             armor: 1,

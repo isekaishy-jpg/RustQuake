@@ -146,12 +146,8 @@ impl Pak {
             let name_len = name_buf.iter().position(|b| *b == 0).unwrap_or(56);
             let name = String::from_utf8_lossy(&name_buf[..name_len]).to_string();
 
-            let offset = u32::from_le_bytes(
-                dir_data[cursor + 56..cursor + 60].try_into().unwrap(),
-            );
-            let length = u32::from_le_bytes(
-                dir_data[cursor + 60..cursor + 64].try_into().unwrap(),
-            );
+            let offset = u32::from_le_bytes(dir_data[cursor + 56..cursor + 60].try_into().unwrap());
+            let length = u32::from_le_bytes(dir_data[cursor + 60..cursor + 64].try_into().unwrap());
             entries.push(PakEntry {
                 name,
                 offset,

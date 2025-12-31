@@ -68,10 +68,7 @@ fn parse_quake_dir(contents: &str) -> Option<String> {
         let mut parts = line.splitn(2, '=');
         let _key = parts.next()?;
         let raw_value = parts.next()?.trim();
-        let trimmed = raw_value
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim();
+        let trimmed = raw_value.trim_matches('"').trim_matches('\'').trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
@@ -115,10 +112,7 @@ mod tests {
             # comment
             quake_dir = "C:/Games/Quake"
         "#;
-        assert_eq!(
-            parse_quake_dir(input).as_deref(),
-            Some("C:/Games/Quake")
-        );
+        assert_eq!(parse_quake_dir(input).as_deref(), Some("C:/Games/Quake"));
     }
 
     #[test]

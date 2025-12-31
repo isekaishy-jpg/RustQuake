@@ -64,12 +64,18 @@ impl Bsp {
             return Err(BspError::UnsupportedVersion(version));
         }
 
-        let mut lumps = [Lump { offset: 0, length: 0 }; HEADER_LUMPS];
+        let mut lumps = [Lump {
+            offset: 0,
+            length: 0,
+        }; HEADER_LUMPS];
         let mut offset = 4;
         for lump in &mut lumps {
             let ofs = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             let len = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
-            *lump = Lump { offset: ofs, length: len };
+            *lump = Lump {
+                offset: ofs,
+                length: len,
+            };
             offset += 8;
         }
 

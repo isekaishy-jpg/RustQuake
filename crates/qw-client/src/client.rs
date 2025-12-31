@@ -1,8 +1,8 @@
-use qw_common::{
-    build_out_of_band, is_out_of_band, out_of_band_payload, parse_oob_message, parse_svc_stream,
-    Netchan, NetchanError, OobMessage, QuakeFs, SvcMessage, SvcParseError,
-};
 use crate::handshake;
+use qw_common::{
+    Netchan, NetchanError, OobMessage, QuakeFs, SvcMessage, SvcParseError, build_out_of_band,
+    is_out_of_band, out_of_band_payload, parse_oob_message, parse_svc_stream,
+};
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -48,8 +48,8 @@ impl Client {
     pub fn handle_packet(&mut self, packet: &[u8]) -> Result<ClientPacket, ClientError> {
         if is_out_of_band(packet) {
             let payload = out_of_band_payload(packet).unwrap_or(&[]);
-            let message = parse_oob_message(payload)
-                .unwrap_or_else(|| OobMessage::Unknown(0, String::new()));
+            let message =
+                parse_oob_message(payload).unwrap_or_else(|| OobMessage::Unknown(0, String::new()));
             return Ok(ClientPacket::OutOfBand(message));
         }
 
@@ -71,7 +71,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qw_common::{SizeBuf, SvcMessage, Svc};
+    use qw_common::{SizeBuf, Svc, SvcMessage};
 
     #[test]
     fn handles_oob() {

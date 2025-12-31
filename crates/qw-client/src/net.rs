@@ -63,7 +63,9 @@ mod tests {
         assert_eq!(&buf[..size], b"ping");
 
         server.send_to(b"pong", client_addr).unwrap();
-        client.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
 
         let mut recv_buf = [0u8; 64];
         let mut received = None;

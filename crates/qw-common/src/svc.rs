@@ -1,18 +1,19 @@
 // Server-to-client message parsing.
 
-use crate::client_messages::{parse_serverdata, parse_string_list_chunk, ServerData, StringListChunk};
+use crate::client_messages::{
+    ServerData, StringListChunk, parse_serverdata, parse_string_list_chunk,
+};
 use crate::msg::{MsgReadError, MsgReader, SizeBuf, SizeBufError};
 use crate::protocol::{
-    Svc, PF_COMMAND, PF_EFFECTS, PF_MSEC, PF_MODEL, PF_SKINNUM, PF_VELOCITY1, PF_VELOCITY2,
-    PF_VELOCITY3, PF_WEAPONFRAME, DEFAULT_SOUND_PACKET_ATTENUATION,
-    DEFAULT_SOUND_PACKET_VOLUME, DEFAULT_VIEWHEIGHT, SND_ATTENUATION, SND_VOLUME, SU_ARMOR,
-    SU_IDEALPITCH, SU_INWATER, SU_ONGROUND, SU_PUNCH1, SU_PUNCH2, SU_PUNCH3,
-    SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT, SU_WEAPON, SU_WEAPONFRAME, TE_BLOOD,
-    TE_EXPLOSION,
-    TE_GUNSHOT, TE_KNIGHTSPIKE, TE_LAVASPLASH, TE_LIGHTNING1, TE_LIGHTNING2, TE_LIGHTNING3,
-    TE_LIGHTNINGBLOOD, TE_SPIKE, TE_SUPERSPIKE, TE_TAREXPLOSION, TE_TELEPORT, TE_WIZSPIKE,
-    U_ANGLE1, U_ANGLE2, U_ANGLE3, U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS,
-    U_ORIGIN1, U_ORIGIN2, U_ORIGIN3, U_REMOVE, U_SKIN, U_SOLID,
+    DEFAULT_SOUND_PACKET_ATTENUATION, DEFAULT_SOUND_PACKET_VOLUME, DEFAULT_VIEWHEIGHT, PF_COMMAND,
+    PF_EFFECTS, PF_MODEL, PF_MSEC, PF_SKINNUM, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3,
+    PF_WEAPONFRAME, SND_ATTENUATION, SND_VOLUME, SU_ARMOR, SU_IDEALPITCH, SU_INWATER, SU_ONGROUND,
+    SU_PUNCH1, SU_PUNCH2, SU_PUNCH3, SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT,
+    SU_WEAPON, SU_WEAPONFRAME, Svc, TE_BLOOD, TE_EXPLOSION, TE_GUNSHOT, TE_KNIGHTSPIKE,
+    TE_LAVASPLASH, TE_LIGHTNING1, TE_LIGHTNING2, TE_LIGHTNING3, TE_LIGHTNINGBLOOD, TE_SPIKE,
+    TE_SUPERSPIKE, TE_TAREXPLOSION, TE_TELEPORT, TE_WIZSPIKE, U_ANGLE1, U_ANGLE2, U_ANGLE3,
+    U_COLORMAP, U_EFFECTS, U_FRAME, U_MODEL, U_MOREBITS, U_ORIGIN1, U_ORIGIN2, U_ORIGIN3, U_REMOVE,
+    U_SKIN, U_SOLID,
 };
 use crate::types::{EntityState, UserCmd, Vec3};
 
@@ -23,17 +24,32 @@ pub enum SvcMessage {
     ServerData(ServerData),
     Version(i32),
     Time(f32),
-    Print { level: u8, message: String },
+    Print {
+        level: u8,
+        message: String,
+    },
     CenterPrint(String),
     StuffText(String),
     SoundList(StringListChunk),
     ModelList(StringListChunk),
-    LightStyle { style: u8, value: String },
-    UpdateName { slot: u8, name: String },
-    SetView { entity: u16 },
+    LightStyle {
+        style: u8,
+        value: String,
+    },
+    UpdateName {
+        slot: u8,
+        name: String,
+    },
+    SetView {
+        entity: u16,
+    },
     SetAngle(Vec3),
     ClientData(ClientDataMessage),
-    Damage { armor: u8, blood: u8, origin: Vec3 },
+    Damage {
+        armor: u8,
+        blood: u8,
+        origin: Vec3,
+    },
     SetPause(bool),
     SignonNum(u8),
     SpawnStatic(EntityState),
@@ -43,35 +59,66 @@ pub enum SvcMessage {
         volume: u8,
         attenuation: u8,
     },
-    Intermission { origin: Vec3, angles: Vec3 },
+    Intermission {
+        origin: Vec3,
+        angles: Vec3,
+    },
     Finale(String),
     CdTrack(u8),
     SellScreen,
     SmallKick,
     BigKick,
-    MuzzleFlash { entity: u16 },
-    UpdateStat { index: u8, value: u8 },
-    UpdateStatLong { index: u8, value: i32 },
+    MuzzleFlash {
+        entity: u16,
+    },
+    UpdateStat {
+        index: u8,
+        value: u8,
+    },
+    UpdateStatLong {
+        index: u8,
+        value: i32,
+    },
     KilledMonster,
     FoundSecret,
     MaxSpeed(f32),
     EntGravity(f32),
-    UpdateColors { slot: u8, colors: u8 },
+    UpdateColors {
+        slot: u8,
+        colors: u8,
+    },
     Particle(ParticleEffect),
     TempEntity(TempEntityMessage),
     Sound(SoundMessage),
-    StopSound { entity: u16, channel: u8 },
+    StopSound {
+        entity: u16,
+        channel: u8,
+    },
     Download {
         size: i16,
         percent: u8,
         data: Vec<u8>,
     },
-    Nails { projectiles: Vec<NailProjectile> },
+    Nails {
+        projectiles: Vec<NailProjectile>,
+    },
     ChokeCount(u8),
-    UpdateFrags { slot: u8, frags: i16 },
-    UpdatePing { slot: u8, ping: i16 },
-    UpdatePl { slot: u8, packet_loss: u8 },
-    UpdateEnterTime { slot: u8, seconds_ago: f32 },
+    UpdateFrags {
+        slot: u8,
+        frags: i16,
+    },
+    UpdatePing {
+        slot: u8,
+        ping: i16,
+    },
+    UpdatePl {
+        slot: u8,
+        packet_loss: u8,
+    },
+    UpdateEnterTime {
+        slot: u8,
+        seconds_ago: f32,
+    },
     UpdateUserInfo {
         slot: u8,
         user_id: i32,
@@ -660,15 +707,8 @@ fn parse_temp_entity(reader: &mut MsgReader) -> Result<TempEntityMessage, SvcPar
                 entity: None,
             })
         }
-        TE_SPIKE
-        | TE_SUPERSPIKE
-        | TE_WIZSPIKE
-        | TE_KNIGHTSPIKE
-        | TE_EXPLOSION
-        | TE_TAREXPLOSION
-        | TE_LAVASPLASH
-        | TE_TELEPORT
-        | TE_LIGHTNINGBLOOD => {
+        TE_SPIKE | TE_SUPERSPIKE | TE_WIZSPIKE | TE_KNIGHTSPIKE | TE_EXPLOSION
+        | TE_TAREXPLOSION | TE_LAVASPLASH | TE_TELEPORT | TE_LIGHTNINGBLOOD => {
             let origin = Vec3::new(
                 reader.read_coord()?,
                 reader.read_coord()?,
@@ -703,7 +743,10 @@ fn parse_packet_entities(
             entities.push(delta);
         }
     }
-    Ok(PacketEntitiesUpdate { delta_from, entities })
+    Ok(PacketEntitiesUpdate {
+        delta_from,
+        entities,
+    })
 }
 
 fn write_baseline(buf: &mut SizeBuf, baseline: &EntityState) -> Result<(), SizeBufError> {
@@ -779,7 +822,11 @@ fn parse_particle(reader: &mut MsgReader) -> Result<ParticleEffect, MsgReadError
         reader.read_i8()? as f32 * (1.0 / 16.0),
     );
     let msgcount = reader.read_u8()?;
-    let count = if msgcount == 255 { 1024 } else { msgcount as u16 };
+    let count = if msgcount == 255 {
+        1024
+    } else {
+        msgcount as u16
+    };
     let color = reader.read_u8()?;
     Ok(ParticleEffect {
         origin,
@@ -796,12 +843,12 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
         Svc::Nop => Ok(SvcMessage::Nop),
         Svc::Disconnect => Ok(SvcMessage::Disconnect),
         Svc::Version => Ok(SvcMessage::Version(reader.read_i32()?)),
-        Svc::ServerData => Ok(SvcMessage::ServerData(parse_serverdata(reader).map_err(|err| {
-            match err {
+        Svc::ServerData => Ok(SvcMessage::ServerData(parse_serverdata(reader).map_err(
+            |err| match err {
                 crate::client_messages::ServerDataError::Read(e) => SvcParseError::Read(e),
                 _ => SvcParseError::UnsupportedSvc(Svc::ServerData),
-            }
-        })?)),
+            },
+        )?)),
         Svc::Time => Ok(SvcMessage::Time(reader.read_f32()?)),
         Svc::Print => {
             let level = reader.read_u8()?;
@@ -953,7 +1000,11 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             } else {
                 Vec::new()
             };
-            Ok(SvcMessage::Download { size, percent, data })
+            Ok(SvcMessage::Download {
+                size,
+                percent,
+                data,
+            })
         }
         Svc::Nails => {
             let count = reader.read_u8()?;
@@ -1085,10 +1136,12 @@ pub fn parse_svc_message(reader: &mut MsgReader) -> Result<SvcMessage, SvcParseE
             let baseline = parse_baseline(reader)?;
             Ok(SvcMessage::SpawnBaseline { entity, baseline })
         }
-        Svc::PacketEntities => Ok(SvcMessage::PacketEntities(parse_packet_entities(reader, false)?)),
-        Svc::DeltaPacketEntities => {
-            Ok(SvcMessage::PacketEntities(parse_packet_entities(reader, true)?))
-        }
+        Svc::PacketEntities => Ok(SvcMessage::PacketEntities(parse_packet_entities(
+            reader, false,
+        )?)),
+        Svc::DeltaPacketEntities => Ok(SvcMessage::PacketEntities(parse_packet_entities(
+            reader, true,
+        )?)),
         _ => Err(SvcParseError::UnsupportedSvc(svc)),
     }
 }
@@ -1332,7 +1385,11 @@ pub fn write_svc_message(buf: &mut SizeBuf, message: &SvcMessage) -> Result<(), 
             let field = ((entity & 1023) << 3) | (*channel as u16 & 7);
             buf.write_u16(field)?;
         }
-        SvcMessage::Download { size, percent, data } => {
+        SvcMessage::Download {
+            size,
+            percent,
+            data,
+        } => {
             buf.write_u8(Svc::Download as u8)?;
             buf.write_i16(*size)?;
             buf.write_u8(*percent)?;
@@ -1559,24 +1616,11 @@ mod tests {
     #[test]
     fn parses_update_frags() {
         let mut buf = SizeBuf::new(64);
-        write_svc_message(
-            &mut buf,
-            &SvcMessage::UpdateFrags {
-                slot: 4,
-                frags: 15,
-            },
-        )
-        .unwrap();
+        write_svc_message(&mut buf, &SvcMessage::UpdateFrags { slot: 4, frags: 15 }).unwrap();
 
         let mut reader = MsgReader::new(buf.as_slice());
         let msg = parse_svc_message(&mut reader).unwrap();
-        assert_eq!(
-            msg,
-            SvcMessage::UpdateFrags {
-                slot: 4,
-                frags: 15
-            }
-        );
+        assert_eq!(msg, SvcMessage::UpdateFrags { slot: 4, frags: 15 });
     }
 
     #[test]
@@ -1706,16 +1750,7 @@ mod tests {
         let mut buf = SizeBuf::new(32);
         write_svc_message(&mut buf, &message).unwrap();
 
-        let expected = [
-            Svc::Nails as u8,
-            1,
-            0x00,
-            0x08,
-            0x80,
-            0x00,
-            0x48,
-            0x40,
-        ];
+        let expected = [Svc::Nails as u8, 1, 0x00, 0x08, 0x80, 0x00, 0x48, 0x40];
         assert_eq!(buf.as_slice(), &expected);
 
         let mut reader = MsgReader::new(buf.as_slice());
@@ -1726,24 +1761,11 @@ mod tests {
     #[test]
     fn parses_update_ping() {
         let mut buf = SizeBuf::new(64);
-        write_svc_message(
-            &mut buf,
-            &SvcMessage::UpdatePing {
-                slot: 7,
-                ping: 123,
-            },
-        )
-        .unwrap();
+        write_svc_message(&mut buf, &SvcMessage::UpdatePing { slot: 7, ping: 123 }).unwrap();
 
         let mut reader = MsgReader::new(buf.as_slice());
         let msg = parse_svc_message(&mut reader).unwrap();
-        assert_eq!(
-            msg,
-            SvcMessage::UpdatePing {
-                slot: 7,
-                ping: 123
-            }
-        );
+        assert_eq!(msg, SvcMessage::UpdatePing { slot: 7, ping: 123 });
     }
 
     #[test]
@@ -1855,7 +1877,10 @@ mod tests {
         write_svc_message(&mut buf, &SvcMessage::BigKick).unwrap();
 
         let mut reader = MsgReader::new(buf.as_slice());
-        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::SmallKick);
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::SmallKick
+        );
         assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::BigKick);
     }
 
@@ -1866,8 +1891,14 @@ mod tests {
         write_svc_message(&mut buf, &SvcMessage::Time(12.5)).unwrap();
 
         let mut reader = MsgReader::new(buf.as_slice());
-        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::Version(28));
-        assert_eq!(parse_svc_message(&mut reader).unwrap(), SvcMessage::Time(12.5));
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::Version(28)
+        );
+        assert_eq!(
+            parse_svc_message(&mut reader).unwrap(),
+            SvcMessage::Time(12.5)
+        );
     }
 
     #[test]

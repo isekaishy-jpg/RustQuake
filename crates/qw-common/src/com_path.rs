@@ -31,11 +31,7 @@ pub fn file_extension(path: &str) -> String {
             found = true;
         }
     }
-    if found {
-        out
-    } else {
-        String::new()
-    }
+    if found { out } else { String::new() }
 }
 
 pub fn file_base(path: &str) -> String {

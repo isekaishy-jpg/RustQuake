@@ -105,7 +105,11 @@ impl Netchan {
             reliable: send_reliable,
             ack: self.incoming_sequence,
             ack_reliable: self.incoming_reliable_sequence != 0,
-            qport: if include_qport { Some(self.qport) } else { None },
+            qport: if include_qport {
+                Some(self.qport)
+            } else {
+                None
+            },
         };
 
         self.outgoing_sequence = self.outgoing_sequence.wrapping_add(1);

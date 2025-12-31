@@ -15,7 +15,10 @@ impl NetAddr {
     }
 
     pub fn to_string(&self) -> String {
-        format!("{}.{}.{}.{}:{}", self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port)
+        format!(
+            "{}.{}.{}.{}:{}",
+            self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port
+        )
     }
 
     pub fn to_socket_addr(&self) -> SocketAddrV4 {
@@ -41,7 +44,9 @@ impl NetAddr {
 
         let mut ip = [0u8; 4];
         for (i, octet) in octets.iter().enumerate() {
-            let value = octet.parse::<u8>().map_err(|_| NetAddrError::InvalidFormat)?;
+            let value = octet
+                .parse::<u8>()
+                .map_err(|_| NetAddrError::InvalidFormat)?;
             ip[i] = value;
         }
 

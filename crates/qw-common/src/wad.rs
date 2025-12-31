@@ -115,7 +115,11 @@ impl Wad {
             offset += 32;
         }
 
-        Ok(Wad { path, data, entries })
+        Ok(Wad {
+            path,
+            data,
+            entries,
+        })
     }
 }
 

@@ -8,9 +8,9 @@ use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
-    clc, find_game_dir, find_id1_dir, locate_data_dir, Bsp, BspError, DataPathError, FsError,
-    NetchanError, OobMessage, QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP,
-    UPDATE_MASK, UserCmd,
+    Bsp, BspError, DataPathError, FsError, NetchanError, OobMessage, QuakeFs, SizeBuf,
+    SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc, find_game_dir,
+    find_id1_dir, locate_data_dir,
 };
 use std::path::PathBuf;
 
@@ -162,8 +162,7 @@ impl ClientRunner {
         self.state.frames[index].senttime = now;
 
         if self.state.valid_sequence != 0
-            && sequence.wrapping_sub(self.state.valid_sequence as u32)
-                >= (UPDATE_BACKUP as u32 - 1)
+            && sequence.wrapping_sub(self.state.valid_sequence as u32) >= (UPDATE_BACKUP as u32 - 1)
         {
             self.state.valid_sequence = 0;
         }
@@ -273,7 +272,11 @@ impl ClientRunner {
             SvcMessage::StuffText(text) => {
                 self.handle_stufftext(text)?;
             }
-            SvcMessage::Download { size, percent, data } => {
+            SvcMessage::Download {
+                size,
+                percent,
+                data,
+            } => {
                 self.handle_download(*size, *percent, data)?;
             }
             _ => {}
@@ -468,12 +471,7 @@ impl ClientRunner {
         Ok(true)
     }
 
-    fn handle_download(
-        &mut self,
-        size: i16,
-        percent: u8,
-        data: &[u8],
-    ) -> Result<(), RunnerError> {
+    fn handle_download(&mut self, size: i16, percent: u8, data: &[u8]) -> Result<(), RunnerError> {
         let Some(state) = &mut self.download else {
             return Ok(());
         };
@@ -615,8 +613,8 @@ mod tests {
     use super::*;
     use crate::session::SessionState;
     use qw_common::{
-        build_out_of_band, out_of_band_payload, Clc, MsgReader, Netchan, S2C_CHALLENGE,
-        S2C_CONNECTION, ServerData, SizeBuf, SvcMessage, UserCmd, Vec3,
+        Clc, MsgReader, Netchan, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf, SvcMessage,
+        UserCmd, Vec3, build_out_of_band, out_of_band_payload,
     };
     use std::net::UdpSocket;
     use std::sync::Mutex;
@@ -702,7 +700,10 @@ mod tests {
 
         let local_port = runner.net.local_addr().unwrap().port();
         server
-            .send_to(&packet, std::net::SocketAddr::from(([127, 0, 0, 1], local_port)))
+            .send_to(
+                &packet,
+                std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
+            )
             .unwrap();
 
         let mut client_buf = [0u8; 256];
@@ -738,7 +739,10 @@ mod tests {
 
         let local_port = runner.net.local_addr().unwrap().port();
         server
-            .send_to(&packet, std::net::SocketAddr::from(([127, 0, 0, 1], local_port)))
+            .send_to(
+                &packet,
+                std::net::SocketAddr::from(([127, 0, 0, 1], local_port)),
+            )
             .unwrap();
 
         let mut client_buf = [0u8; 128];
@@ -1058,13 +1062,24 @@ mod tests {
         let mut client_buf = [0u8; 256];
         for _ in 0..10 {
             let _ = runner.poll_once(&mut client_buf).unwrap();
-            if runner.state.serverinfo.as_str().contains("\\hostname\\unit") {
+            if runner
+                .state
+                .serverinfo
+                .as_str()
+                .contains("\\hostname\\unit")
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        assert!(runner.state.serverinfo.as_str().contains("\\hostname\\unit"));
+        assert!(
+            runner
+                .state
+                .serverinfo
+                .as_str()
+                .contains("\\hostname\\unit")
+        );
     }
 
     fn recv_payload(server: &UdpSocket, chan: &mut Netchan) -> Vec<u8> {
@@ -1325,10 +1340,7 @@ mod tests {
         session.state = SessionState::Connected;
         let mut runner = ClientRunner::new(net, session);
 
-        runner.state.sounds = vec![
-            "misc/foo.wav".to_string(),
-            "misc/foo.wav".to_string(),
-        ];
+        runner.state.sounds = vec!["misc/foo.wav".to_string(), "misc/foo.wav".to_string()];
         runner.queue_missing_sounds().unwrap();
 
         assert_eq!(runner.download_queue.len(), 1);
@@ -1392,7 +1404,10 @@ mod tests {
             })
             .unwrap();
 
-        let download = runner.download.as_ref().expect("expected download to start");
+        let download = runner
+            .download
+            .as_ref()
+            .expect("expected download to start");
         let expected = std::path::Path::new("skins").join("base.pcx");
         assert!(download.final_path.ends_with(&expected));
         assert!(runner.download_queue.is_empty());

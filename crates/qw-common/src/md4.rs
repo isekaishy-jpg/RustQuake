@@ -35,8 +35,7 @@ impl Md4 {
                 self.buffer_len = 0;
                 offset += remaining;
             } else {
-                self.buffer[self.buffer_len..self.buffer_len + data.len()]
-                    .copy_from_slice(data);
+                self.buffer[self.buffer_len..self.buffer_len + data.len()].copy_from_slice(data);
                 self.buffer_len += data.len();
                 return;
             }

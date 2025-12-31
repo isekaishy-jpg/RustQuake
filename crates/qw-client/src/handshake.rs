@@ -1,4 +1,4 @@
-use qw_common::{build_out_of_band, out_of_band_payload, OobMessage, PROTOCOL_VERSION};
+use qw_common::{OobMessage, PROTOCOL_VERSION, build_out_of_band, out_of_band_payload};
 
 #[derive(Debug, Clone)]
 pub struct ConnectRequest {
@@ -47,7 +47,7 @@ pub fn is_oob_packet(packet: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qw_common::{out_of_band_payload, OobMessage, S2C_CHALLENGE};
+    use qw_common::{OobMessage, S2C_CHALLENGE, out_of_band_payload};
 
     #[test]
     fn builds_getchallenge() {

@@ -33,8 +33,10 @@ pub fn write_move_message(buf: &mut SizeBuf, message: &MoveMessage) -> Result<()
     buf.write_delta_usercmd(&message.cmds[0], &message.cmds[1])?;
     buf.write_delta_usercmd(&message.cmds[1], &message.cmds[2])?;
 
-    let checksum =
-        block_sequence_crc_byte(&buf.as_slice()[checksum_index + 1..], message.sequence as i32);
+    let checksum = block_sequence_crc_byte(
+        &buf.as_slice()[checksum_index + 1..],
+        message.sequence as i32,
+    );
     buf.set_u8(checksum_index, checksum)?;
 
     if let Some(delta) = message.delta_sequence {
