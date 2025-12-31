@@ -345,7 +345,15 @@ impl ClientRunner {
             return Ok(true);
         }
 
-        let Some(name) = self.download_queue.pop_front() else {
+        let mut name = None;
+        while let Some(candidate) = self.download_queue.pop_front() {
+            if is_safe_download_path(&candidate) {
+                name = Some(candidate);
+                break;
+            }
+        }
+
+        let Some(name) = name else {
             return Ok(false);
         };
         let Some(data) = &self.state.serverdata else {
@@ -450,6 +458,27 @@ impl ClientRunner {
         path.push("downloads");
         Ok(path)
     }
+}
+
+fn is_safe_download_path(name: &str) -> bool {
+    if name.is_empty() || name.contains(':') || name.contains('\0') {
+        return false;
+    }
+    let path = std::path::Path::new(name);
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    true
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
