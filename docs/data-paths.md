@@ -17,3 +17,8 @@ out of version control.
 `C:/Program Files (x86)/Steam/steamapps/common/Quake`
 
 Base content is in `id1/PAK0.PAK` and `id1/PAK1.PAK`.
+
+## Known Steam layout (Linux)
+`~/.steam/steam/steamapps/common/Quake`
+`~/.steam/root/steamapps/common/Quake`
+`~/.local/share/Steam/steamapps/common/Quake`
