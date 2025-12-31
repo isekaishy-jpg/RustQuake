@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::time::Instant;
@@ -79,6 +79,7 @@ pub struct ClientRunner {
     fs_game_dir: Option<String>,
     data_dir: Option<PathBuf>,
     download_queue: VecDeque<String>,
+    download_seen: HashSet<String>,
     download: Option<DownloadState>,
     signon_phase: SignonPhase,
 }
@@ -95,6 +96,7 @@ impl ClientRunner {
             fs_game_dir: None,
             data_dir: None,
             download_queue: VecDeque::new(),
+            download_seen: HashSet::new(),
             download: None,
             signon_phase: SignonPhase::Idle,
         }
@@ -211,6 +213,8 @@ impl ClientRunner {
     fn handle_signon(&mut self, message: &SvcMessage) -> Result<(), RunnerError> {
         match message {
             SvcMessage::ServerData(data) => {
+                self.download_queue.clear();
+                self.download_seen.clear();
                 let cmd = format!("soundlist {} 0", data.server_count);
                 self.signon_phase = SignonPhase::SoundList;
                 self.send_string_cmd(&cmd)?;
@@ -225,6 +229,7 @@ impl ClientRunner {
                 } else {
                     self.ensure_filesystem(&data)?;
                     self.download_queue.clear();
+                    self.download_seen.clear();
                     self.queue_missing_sounds()?;
                     if self.start_next_download()? {
                         self.signon_phase = SignonPhase::ModelList;
@@ -245,11 +250,13 @@ impl ClientRunner {
                 } else {
                     self.ensure_filesystem(&data)?;
                     self.download_queue.clear();
+                    self.download_seen.clear();
                     self.queue_missing_models()?;
                     if self.start_next_download()? {
                         self.signon_phase = SignonPhase::Skins;
                     } else {
                         self.download_queue.clear();
+                        self.download_seen.clear();
                         self.queue_missing_skins()?;
                         if self.start_next_download()? {
                             self.signon_phase = SignonPhase::Prespawn;
@@ -345,7 +352,7 @@ impl ClientRunner {
                 continue;
             }
             let path = format!("sound/{}", name);
-            if !self.client.fs.contains(&path) {
+            if !self.client.fs.contains(&path) && self.download_seen.insert(path.clone()) {
                 self.download_queue.push_back(path);
             }
         }
@@ -357,7 +364,7 @@ impl ClientRunner {
             if name.is_empty() || name.starts_with('*') {
                 continue;
             }
-            if !self.client.fs.contains(name) {
+            if !self.client.fs.contains(name) && self.download_seen.insert(name.clone()) {
                 self.download_queue.push_back(name.clone());
             }
         }
@@ -378,7 +385,7 @@ impl ClientRunner {
                 continue;
             }
             let path = format!("skins/{}.pcx", base);
-            if !self.client.fs.contains(&path) {
+            if !self.client.fs.contains(&path) && self.download_seen.insert(path.clone()) {
                 self.download_queue.push_back(path);
             }
         }
@@ -482,6 +489,7 @@ impl ClientRunner {
             }
             SignonPhase::Skins => {
                 self.download_queue.clear();
+                self.download_seen.clear();
                 self.queue_missing_skins()?;
                 if self.start_next_download()? {
                     self.signon_phase = SignonPhase::Prespawn;
@@ -1235,5 +1243,24 @@ mod tests {
         }
         std::fs::remove_dir_all(download_dir).ok();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn dedupes_download_queue() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        runner.state.sounds = vec![
+            "misc/foo.wav".to_string(),
+            "misc/foo.wav".to_string(),
+        ];
+        runner.queue_missing_sounds().unwrap();
+
+        assert_eq!(runner.download_queue.len(), 1);
+        assert_eq!(runner.download_seen.len(), 1);
     }
 }
