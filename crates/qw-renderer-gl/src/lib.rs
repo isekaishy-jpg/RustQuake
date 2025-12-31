@@ -1,4 +1,7 @@
-use qw_common::{AliasModel, BspRender, FaceVertex, MdlFrame, Palette, Sprite, SpriteImage, Vec3};
+use qw_common::{
+    AliasModel, BspRender, FaceVertex, MdlFrame, MdlSkin, Palette, Sprite, SpriteFrame,
+    SpriteImage, Vec3,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -165,6 +168,7 @@ pub struct ResolvedEntity<'a> {
     pub entity: &'a RenderEntity,
     pub model: Option<&'a RenderModel>,
     pub frame: Option<RenderModelFrame<'a>>,
+    pub texture_index: Option<usize>,
 }
 
 impl RenderModel {
@@ -176,6 +180,21 @@ impl RenderModel {
             RenderModelKind::Sprite(sprite) => sprite
                 .frame_at_time(frame as usize, time)
                 .map(RenderModelFrame::Sprite),
+        }
+    }
+
+    pub fn texture_index(&self, frame: u32, skin: u32, time: f32) -> Option<usize> {
+        if self.textures.is_empty() {
+            return None;
+        }
+        let index = match &self.kind {
+            RenderModelKind::Alias(model) => alias_skin_index(model, skin, time),
+            RenderModelKind::Sprite(sprite) => sprite_frame_index(sprite, frame, time),
+        }?;
+        if index < self.textures.len() {
+            Some(index)
+        } else {
+            None
         }
     }
 }
@@ -393,10 +412,13 @@ impl GlRenderer {
                     .get(entity.model_index)
                     .and_then(|entry| entry.as_ref());
                 let frame = model.and_then(|model| model.frame_at_time(entity.frame, time));
+                let texture_index =
+                    model.and_then(|model| model.texture_index(entity.frame, entity.skin, time));
                 ResolvedEntity {
                     entity,
                     model,
                     frame,
+                    texture_index,
                 }
             })
             .collect()
@@ -709,6 +731,73 @@ fn style_value(lightstyles: &[String], style_id: u8, time: f32) -> f32 {
     (byte.saturating_sub(b'a') as f32) / 25.0
 }
 
+fn alias_skin_index(model: &AliasModel, skin: u32, time: f32) -> Option<usize> {
+    let target = skin as usize;
+    let mut offset = 0usize;
+    for (idx, entry) in model.skins.iter().enumerate() {
+        if idx == target {
+            let index = match entry {
+                MdlSkin::Single { .. } => 0,
+                MdlSkin::Group {
+                    intervals, frames, ..
+                } => group_frame_index(intervals, frames.len(), time),
+            };
+            return Some(offset + index);
+        }
+        offset += match entry {
+            MdlSkin::Single { .. } => 1,
+            MdlSkin::Group { frames, .. } => frames.len(),
+        };
+    }
+    None
+}
+
+fn sprite_frame_index(sprite: &Sprite, frame: u32, time: f32) -> Option<usize> {
+    let target = frame as usize;
+    let mut offset = 0usize;
+    for (idx, entry) in sprite.frames.iter().enumerate() {
+        if idx == target {
+            let index = match entry {
+                SpriteFrame::Single(_) => 0,
+                SpriteFrame::Group { intervals, frames } => {
+                    group_frame_index(intervals, frames.len(), time)
+                }
+            };
+            return Some(offset + index);
+        }
+        offset += match entry {
+            SpriteFrame::Single(_) => 1,
+            SpriteFrame::Group { frames, .. } => frames.len(),
+        };
+    }
+    None
+}
+
+fn group_frame_index(intervals: &[f32], frame_count: usize, time: f32) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    let count = intervals.len().min(frame_count);
+    if count == 0 {
+        return 0;
+    }
+    let total: f32 = intervals.iter().take(count).sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let mut t = time % total;
+    if t < 0.0 {
+        t += total;
+    }
+    for (idx, interval) in intervals.iter().take(count).enumerate() {
+        if t < *interval {
+            return idx;
+        }
+        t -= *interval;
+    }
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,7 +941,11 @@ mod tests {
         };
         let model = RenderModel {
             kind: RenderModelKind::Sprite(sprite),
-            textures: Vec::new(),
+            textures: vec![RenderModelTexture {
+                width: 1,
+                height: 1,
+                rgba: vec![9, 9, 9, 255],
+            }],
         };
 
         let mut renderer = GlRenderer::new(RendererConfig::default());
@@ -876,6 +969,115 @@ mod tests {
             }
             _ => panic!("expected sprite frame"),
         }
+        assert_eq!(resolved[0].texture_index, Some(0));
+    }
+
+    #[test]
+    fn selects_alias_skin_texture_index() {
+        let header = qw_common::MdlHeader {
+            scale: Vec3::default(),
+            translate: Vec3::default(),
+            bounding_radius: 0.0,
+            eye_position: Vec3::default(),
+            num_skins: 2,
+            skin_width: 1,
+            skin_height: 1,
+            num_verts: 0,
+            num_tris: 0,
+            num_frames: 0,
+            sync_type: 0,
+            flags: 0,
+            size: 0.0,
+        };
+        let model = RenderModel {
+            kind: RenderModelKind::Alias(AliasModel {
+                header,
+                skins: vec![
+                    MdlSkin::Single {
+                        width: 1,
+                        height: 1,
+                        indices: vec![0],
+                    },
+                    MdlSkin::Group {
+                        width: 1,
+                        height: 1,
+                        intervals: vec![0.1, 0.2],
+                        frames: vec![vec![1], vec![2]],
+                    },
+                ],
+                triangles: Vec::new(),
+                frames: Vec::new(),
+            }),
+            textures: vec![
+                RenderModelTexture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0, 0, 0, 255],
+                },
+                RenderModelTexture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![1, 1, 1, 255],
+                },
+                RenderModelTexture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![2, 2, 2, 255],
+                },
+            ],
+        };
+
+        assert_eq!(model.texture_index(0, 0, 0.0), Some(0));
+        assert_eq!(model.texture_index(0, 1, 0.15), Some(2));
+    }
+
+    #[test]
+    fn selects_sprite_texture_index() {
+        let sprite = Sprite {
+            header: SpriteHeader {
+                sprite_type: 0,
+                bounding_radius: 0.0,
+                width: 1,
+                height: 1,
+                num_frames: 1,
+                beam_length: 0.0,
+                sync_type: 0,
+            },
+            frames: vec![SpriteFrame::Group {
+                intervals: vec![0.1, 0.2],
+                frames: vec![
+                    SpriteImage {
+                        width: 1,
+                        height: 1,
+                        origin: (0, 0),
+                        pixels: vec![1],
+                    },
+                    SpriteImage {
+                        width: 1,
+                        height: 1,
+                        origin: (0, 0),
+                        pixels: vec![2],
+                    },
+                ],
+            }],
+        };
+        let model = RenderModel {
+            kind: RenderModelKind::Sprite(sprite),
+            textures: vec![
+                RenderModelTexture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![1, 1, 1, 255],
+                },
+                RenderModelTexture {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![2, 2, 2, 255],
+                },
+            ],
+        };
+
+        assert_eq!(model.texture_index(0, 0, 0.15), Some(1));
     }
 
     #[test]
