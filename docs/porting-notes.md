@@ -1,13 +1,24 @@
 # Porting Notes
 
-Focus: QuakeWorld in vendor/quake/QW.
+Focus: GLQuake + GLQuakeWorld (OpenGL renderers) from the id-Software Quake source.
+
+Target: one Rust client that supports:
+- Singleplayer (GLQuake / NetQuake rules + id1 content).
+- Online play (GLQuakeWorld / QuakeWorld protocol).
+
+Renderer scope: OpenGL only (software renderer is out of scope).
 
 Planned Rust outputs:
-- crates/qw-client (client binary)
-- crates/qw-server (server binary)
+- crates/qw-client (unified client binary, QW + singleplayer modes)
+- crates/qw-server (QuakeWorld server binary)
 - crates/qw-common (shared code)
 
-Current groundwork:
+Upstream roots (GL focus):
+- vendor/quake/WinQuake (GLQuake sources: gl_*.c, gl_*.h + client/server glue)
+- vendor/quake/QW/client (GLQuakeWorld sources: gl_*.c, gl_*.h + QW client)
+- vendor/quake/QW/server (QuakeWorld server)
+
+Current groundwork (QW path):
 - Data path discovery + local asset lookup (PAK/WAD/BSP header parsing)
 - Message buffer read/write + protocol constants + netchan header/packet logic
 - Server message parsing (serverdata, print, stufftext, sound/modellists)

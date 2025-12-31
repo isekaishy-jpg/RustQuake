@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::cli::{CliAction, DEFAULT_QPORT};
+use crate::cli::{CliAction, ClientMode, DEFAULT_QPORT};
 use crate::config::ClientConfig;
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
@@ -65,7 +65,12 @@ fn run() -> Result<(), AppError> {
         userinfo.set("rate", rate)?;
     }
 
-    let server_addr = std::net::SocketAddr::from(args.server.to_socket_addr());
+    if args.mode == ClientMode::SinglePlayer {
+        return Err(AppError::ModeNotImplemented("singleplayer"));
+    }
+
+    let server = args.server.ok_or(cli::CliError::MissingServer)?;
+    let server_addr = std::net::SocketAddr::from(server.to_socket_addr());
     let net = NetClient::connect(server_addr)?;
     let qport = if args.qport == 0 {
         DEFAULT_QPORT
@@ -180,6 +185,7 @@ enum AppError {
     Runner(RunnerError),
     Info(qw_common::InfoError),
     Io(std::io::Error),
+    ModeNotImplemented(&'static str),
 }
 
 impl std::fmt::Display for AppError {
@@ -189,6 +195,7 @@ impl std::fmt::Display for AppError {
             AppError::Runner(err) => write!(f, "{:?}", err),
             AppError::Info(err) => write!(f, "{}", err),
             AppError::Io(err) => write!(f, "{}", err),
+            AppError::ModeNotImplemented(mode) => write!(f, "{} mode not implemented", mode),
         }
     }
 }

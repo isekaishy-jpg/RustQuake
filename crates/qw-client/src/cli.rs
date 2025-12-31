@@ -5,9 +5,16 @@ use qw_common::NetAddr;
 pub const DEFAULT_SERVER_PORT: u16 = 27500;
 pub const DEFAULT_QPORT: u16 = 27001;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ClientMode {
+    QuakeWorld,
+    SinglePlayer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientArgs {
-    pub server: NetAddr,
+    pub mode: ClientMode,
+    pub server: Option<NetAddr>,
     pub qport: u16,
     pub name: Option<String>,
     pub topcolor: Option<String>,
@@ -45,6 +52,7 @@ impl fmt::Display for CliError {
 pub fn usage() -> &'static str {
     "Usage: qw-client --connect <ip[:port]> [options]\n\
 Options:\n\
+  --mode <qw|sp>             Client mode (default qw)\n\
   -c, --connect <ip[:port]>  Server address (default port 27500)\n\
   --qport <port>             Client qport (default 27001)\n\
   --name <name>              Player name\n\
@@ -62,6 +70,7 @@ where
     S: Into<String>,
 {
     let mut iter = args.into_iter().map(Into::into).peekable();
+    let mut mode = ClientMode::QuakeWorld;
     let mut server_input: Option<String> = None;
     let mut qport = DEFAULT_QPORT;
     let mut name = None;
@@ -74,6 +83,16 @@ where
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(CliAction::Help),
+            "--mode" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| CliError::MissingValue(arg.clone()))?;
+                mode = match value.to_ascii_lowercase().as_str() {
+                    "qw" | "quakeworld" => ClientMode::QuakeWorld,
+                    "sp" | "single" | "singleplayer" => ClientMode::SinglePlayer,
+                    _ => return Err(CliError::InvalidValue(value)),
+                };
+            }
             "-c" | "--connect" => {
                 let value = iter
                     .next()
@@ -135,11 +154,19 @@ where
         }
     }
 
-    let server_input = server_input.ok_or(CliError::MissingServer)?;
-    let server = NetAddr::parse(&server_input, DEFAULT_SERVER_PORT)
-        .map_err(|_| CliError::InvalidValue(server_input))?;
+    let server = match server_input {
+        Some(value) => Some(
+            NetAddr::parse(&value, DEFAULT_SERVER_PORT)
+                .map_err(|_| CliError::InvalidValue(value))?,
+        ),
+        None => None,
+    };
+    if mode == ClientMode::QuakeWorld && server.is_none() {
+        return Err(CliError::MissingServer);
+    }
 
     Ok(CliAction::Run(ClientArgs {
+        mode,
         server,
         qport,
         name,
@@ -162,8 +189,9 @@ mod tests {
         let CliAction::Run(parsed) = action else {
             panic!("expected run action");
         };
-        assert_eq!(parsed.server.ip, [127, 0, 0, 1]);
-        assert_eq!(parsed.server.port, DEFAULT_SERVER_PORT);
+        let server = parsed.server.expect("server");
+        assert_eq!(server.ip, [127, 0, 0, 1]);
+        assert_eq!(server.port, DEFAULT_SERVER_PORT);
         assert_eq!(parsed.qport, DEFAULT_QPORT);
     }
 
@@ -179,7 +207,8 @@ mod tests {
         let CliAction::Run(parsed) = action else {
             panic!("expected run action");
         };
-        assert_eq!(parsed.server.port, 27501);
+        let server = parsed.server.expect("server");
+        assert_eq!(server.port, 27501);
         assert_eq!(parsed.name.as_deref(), Some("unit"));
     }
 
@@ -187,5 +216,16 @@ mod tests {
     fn rejects_missing_server() {
         let err = parse_args(Vec::<String>::new()).unwrap_err();
         assert_eq!(err, CliError::MissingServer);
+    }
+
+    #[test]
+    fn allows_singleplayer_without_server() {
+        let args = vec!["--mode".to_string(), "sp".to_string()];
+        let action = parse_args(args).unwrap();
+        let CliAction::Run(parsed) = action else {
+            panic!("expected run action");
+        };
+        assert_eq!(parsed.mode, ClientMode::SinglePlayer);
+        assert!(parsed.server.is_none());
     }
 }

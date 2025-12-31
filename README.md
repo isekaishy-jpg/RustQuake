@@ -24,6 +24,9 @@ Optional flags include `--data-dir`, `--download-dir`, `--qport`, `--rate`,
 While running, you can type console commands into stdin (e.g. `name`, `skin`,
 `say`) and the client forwards them to the server.
 
+Mode selection: `--mode qw` (default) for QuakeWorld, or `--mode sp` for
+singleplayer (singleplayer runtime is pending).
+
 ## Upstream
 See docs/upstream.md for the exact upstream commit.
 
