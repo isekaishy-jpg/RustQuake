@@ -8,9 +8,9 @@ use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
-    Bsp, BspCollision, BspError, DataPathError, FsError, NetchanError, OobMessage, QuakeFs,
-    SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc, find_game_dir,
-    find_id1_dir, locate_data_dir,
+    Bsp, BspCollision, BspError, BspRender, DataPathError, FsError, NetchanError, OobMessage,
+    QuakeFs, SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc,
+    find_game_dir, find_id1_dir, locate_data_dir,
 };
 use std::path::PathBuf;
 
@@ -306,6 +306,10 @@ impl ClientRunner {
         let bytes = self.client.fs.read(&map_name)?;
         let bsp = Bsp::from_bytes(bytes)?;
         let (_, checksum2) = bsp.map_checksums()?;
+        if self.state.render_world_map.as_deref() != Some(map_name.as_str()) {
+            self.state.render_world = Some(BspRender::from_bsp(&bsp)?);
+            self.state.render_world_map = Some(map_name.clone());
+        }
         if self.state.collision_map.as_deref() != Some(map_name.as_str()) {
             let collision = BspCollision::from_bsp(&bsp)?;
             self.state.collision = Some(collision);

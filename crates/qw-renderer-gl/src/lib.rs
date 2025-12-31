@@ -1,4 +1,4 @@
-use qw_common::Vec3;
+use qw_common::{BspRender, Vec3};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -31,11 +31,27 @@ pub struct RenderView {
     pub fov_y: f32,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderWorld {
+    pub map_name: String,
+    pub bsp: BspRender,
+}
+
+impl RenderWorld {
+    pub fn new(map_name: impl Into<String>, bsp: BspRender) -> Self {
+        Self {
+            map_name: map_name.into(),
+            bsp,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlRenderer {
     config: RendererConfig,
     frame_index: u64,
     last_view: Option<RenderView>,
+    last_world: Option<RenderWorld>,
 }
 
 impl GlRenderer {
@@ -44,6 +60,7 @@ impl GlRenderer {
             config,
             frame_index: 0,
             last_view: None,
+            last_world: None,
         }
     }
 
@@ -57,6 +74,14 @@ impl GlRenderer {
 
     pub fn view(&self) -> Option<RenderView> {
         self.last_view
+    }
+
+    pub fn set_world(&mut self, world: RenderWorld) {
+        self.last_world = Some(world);
+    }
+
+    pub fn world(&self) -> Option<&RenderWorld> {
+        self.last_world.as_ref()
     }
 }
 
@@ -108,5 +133,24 @@ mod tests {
         };
         renderer.set_view(view);
         assert_eq!(renderer.view(), Some(view));
+    }
+
+    #[test]
+    fn stores_world_state() {
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let world = RenderWorld::new(
+            "maps/start.bsp",
+            BspRender {
+                vertices: Vec::new(),
+                edges: Vec::new(),
+                surf_edges: Vec::new(),
+                texinfo: Vec::new(),
+                faces: Vec::new(),
+                textures: Vec::new(),
+                lighting: Vec::new(),
+            },
+        );
+        renderer.set_world(world.clone());
+        assert_eq!(renderer.world(), Some(&world));
     }
 }

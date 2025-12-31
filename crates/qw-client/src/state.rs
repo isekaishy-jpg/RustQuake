@@ -76,6 +76,8 @@ pub struct ClientState {
     pub serverdata: Option<ServerData>,
     pub collision: Option<BspCollision>,
     pub collision_map: Option<String>,
+    pub render_world: Option<qw_common::BspRender>,
+    pub render_world_map: Option<String>,
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
@@ -133,6 +135,8 @@ impl ClientState {
             serverdata: None,
             collision: None,
             collision_map: None,
+            render_world: None,
+            render_world_map: None,
             players,
             sounds: Vec::new(),
             models: Vec::new(),
@@ -184,6 +188,8 @@ impl ClientState {
                 self.serverdata = Some(data.clone());
                 self.collision = None;
                 self.collision_map = None;
+                self.render_world = None;
+                self.render_world_map = None;
                 self.sounds.clear();
                 self.models.clear();
                 self.player_model_index = None;

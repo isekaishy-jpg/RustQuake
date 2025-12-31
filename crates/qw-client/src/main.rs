@@ -24,7 +24,7 @@ use crate::sound::SoundManager;
 use crate::state::ClientState;
 use qw_audio::{AudioConfig, AudioSystem};
 use qw_common::{InfoError, InfoString};
-use qw_renderer_gl::{GlRenderer, RenderView, Renderer, RendererConfig};
+use qw_renderer_gl::{GlRenderer, RenderView, RenderWorld, Renderer, RendererConfig};
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
@@ -101,6 +101,7 @@ fn run() -> Result<(), AppError> {
 
     let mut last_move = Instant::now();
     let mut last_title: Option<String> = None;
+    let mut last_world: Option<String> = None;
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
     let mut pending_server_cmds: VecDeque<String> = VecDeque::new();
@@ -163,6 +164,7 @@ fn run() -> Result<(), AppError> {
                 },
             }
         }
+        update_render_world(&mut renderer, &runner.state, &mut last_world);
         sound_manager.handle_events(&mut audio, &mut runner.state);
         update_window_title(&mut window, &runner.state.serverinfo, &mut last_title);
 
@@ -354,6 +356,24 @@ fn update_window_title(
     }
 }
 
+fn update_render_world(
+    renderer: &mut GlRenderer,
+    state: &ClientState,
+    last_world: &mut Option<String>,
+) {
+    let Some(map_name) = state.render_world_map.as_ref() else {
+        return;
+    };
+    let Some(world) = state.render_world.as_ref() else {
+        return;
+    };
+    if last_world.as_deref() == Some(map_name.as_str()) {
+        return;
+    }
+    renderer.set_world(RenderWorld::new(map_name.clone(), world.clone()));
+    *last_world = Some(map_name.clone());
+}
+
 fn build_render_view(state: &ClientState) -> RenderView {
     let (mut origin, angles) = match state.intermission {
         Some((origin, angles)) => (origin, angles),
@@ -500,5 +520,26 @@ mod tests {
         let view = build_render_view(&state);
         assert_eq!(view.origin, qw_common::Vec3::new(10.0, 20.0, 30.0));
         assert_eq!(view.angles, qw_common::Vec3::new(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn updates_render_world_once() {
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let mut state = ClientState::new();
+        state.render_world_map = Some("maps/start.bsp".to_string());
+        state.render_world = Some(qw_common::BspRender {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            texinfo: Vec::new(),
+            faces: Vec::new(),
+            textures: Vec::new(),
+            lighting: Vec::new(),
+        });
+
+        let mut last_world = None;
+        update_render_world(&mut renderer, &state, &mut last_world);
+        assert_eq!(last_world.as_deref(), Some("maps/start.bsp"));
+        assert!(renderer.world().is_some());
     }
 }

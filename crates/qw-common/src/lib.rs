@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bsp;
+pub mod bsp_render;
 pub mod clc;
 pub mod client_messages;
 pub mod collision;
@@ -25,6 +26,7 @@ pub mod vfs;
 pub mod wad;
 
 pub use bsp::*;
+pub use bsp_render::*;
 pub use clc::*;
 pub use client_messages::*;
 pub use collision::*;
