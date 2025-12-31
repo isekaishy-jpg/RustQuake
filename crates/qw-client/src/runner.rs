@@ -8,8 +8,8 @@ use crate::net::NetClient;
 use crate::session::Session;
 use crate::state::ClientState;
 use qw_common::{
-    Bsp, BspError, DataPathError, FsError, NetchanError, OobMessage, QuakeFs, SizeBuf,
-    SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc, find_game_dir,
+    Bsp, BspCollision, BspError, DataPathError, FsError, NetchanError, OobMessage, QuakeFs,
+    SizeBuf, SizeBufError, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd, clc, find_game_dir,
     find_id1_dir, locate_data_dir,
 };
 use std::path::PathBuf;
@@ -290,6 +290,11 @@ impl ClientRunner {
         let bytes = self.client.fs.read(&map_name)?;
         let bsp = Bsp::from_bytes(bytes)?;
         let (_, checksum2) = bsp.map_checksums()?;
+        if self.state.collision_map.as_deref() != Some(map_name.as_str()) {
+            let collision = BspCollision::from_bsp(&bsp)?;
+            self.state.collision = Some(collision);
+            self.state.collision_map = Some(map_name.clone());
+        }
         Ok(checksum2)
     }
 
@@ -1120,24 +1125,10 @@ mod tests {
         data.extend_from_slice(&qw_common::BSP_VERSION.to_le_bytes());
 
         let header_size = 4 + qw_common::HEADER_LUMPS * 8;
-        let mut offsets = Vec::with_capacity(qw_common::HEADER_LUMPS);
-        let mut payloads = Vec::with_capacity(qw_common::HEADER_LUMPS);
-        let mut cursor = header_size;
-
-        for i in 0..qw_common::HEADER_LUMPS {
-            let payload = vec![i as u8; 4];
-            offsets.push((cursor as u32, payload.len() as u32));
-            cursor += payload.len();
-            payloads.push(payload);
-        }
-
-        for (offset, length) in &offsets {
+        let offset = header_size as u32;
+        for _ in 0..qw_common::HEADER_LUMPS {
             data.extend_from_slice(&offset.to_le_bytes());
-            data.extend_from_slice(&length.to_le_bytes());
-        }
-
-        for payload in payloads {
-            data.extend_from_slice(&payload);
+            data.extend_from_slice(&0u32.to_le_bytes());
         }
 
         data

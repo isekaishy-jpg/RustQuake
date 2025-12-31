@@ -1,10 +1,10 @@
 use qw_common::{
-    ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS, MAX_EDICTS,
-    MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING, NailProjectile,
-    PacketEntities, PacketEntitiesUpdate, STAT_ACTIVEWEAPON, STAT_AMMO, STAT_ARMOR, STAT_CELLS,
-    STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS, STAT_ROCKETS, STAT_SECRETS, STAT_SHELLS,
-    STAT_WEAPON, ServerData, StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK, UserCmd,
-    Vec3,
+    BspCollision, ClientDataMessage, EntityState, Frame, InfoString, MAX_CL_STATS, MAX_CLIENTS,
+    MAX_EDICTS, MAX_INFO_STRING, MAX_LIGHTSTYLES, MAX_PACKET_ENTITIES, MAX_SERVERINFO_STRING,
+    NailProjectile, PacketEntities, PacketEntitiesUpdate, STAT_ACTIVEWEAPON, STAT_AMMO, STAT_ARMOR,
+    STAT_CELLS, STAT_HEALTH, STAT_ITEMS, STAT_MONSTERS, STAT_NAILS, STAT_ROCKETS, STAT_SECRETS,
+    STAT_SHELLS, STAT_WEAPON, ServerData, StringListChunk, SvcMessage, UPDATE_BACKUP, UPDATE_MASK,
+    UserCmd, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -73,6 +73,8 @@ pub struct DamageEvent {
 pub struct ClientState {
     pub serverinfo: InfoString,
     pub serverdata: Option<ServerData>,
+    pub collision: Option<BspCollision>,
+    pub collision_map: Option<String>,
     pub players: Vec<PlayerInfo>,
     pub sounds: Vec<String>,
     pub models: Vec<String>,
@@ -120,6 +122,8 @@ impl ClientState {
         Self {
             serverinfo: InfoString::new(MAX_SERVERINFO_STRING),
             serverdata: None,
+            collision: None,
+            collision_map: None,
             players,
             sounds: Vec::new(),
             models: Vec::new(),
@@ -161,6 +165,8 @@ impl ClientState {
         match msg {
             SvcMessage::ServerData(data) => {
                 self.serverdata = Some(data.clone());
+                self.collision = None;
+                self.collision_map = None;
                 self.sounds.clear();
                 self.models.clear();
                 self.client_data = None;
