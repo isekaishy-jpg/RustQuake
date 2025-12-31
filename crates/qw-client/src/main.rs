@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::{CliAction, ClientMode, DEFAULT_QPORT};
 use crate::config::ClientConfig;
+use crate::input::InputBindings;
 use crate::net::NetClient;
 use crate::runner::{ClientRunner, RunnerError};
 use crate::session::{Session, SessionState};
@@ -99,6 +100,7 @@ fn run() -> Result<(), AppError> {
     let mut buf = [0u8; 8192];
     let mut was_connected = false;
     let mut pending_cmds: VecDeque<String> = VecDeque::new();
+    let input_bindings = InputBindings::default();
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -119,7 +121,13 @@ fn run() -> Result<(), AppError> {
     });
     loop {
         for event in window.poll_events() {
-            if handle_window_event(&mut window, &mut renderer, event, &mut pending_cmds) {
+            if handle_window_event(
+                &mut window,
+                &mut renderer,
+                &input_bindings,
+                event,
+                &mut pending_cmds,
+            ) {
                 return Ok(());
             }
         }
@@ -295,6 +303,7 @@ fn quote_if_needed(value: &str) -> String {
 fn handle_window_event(
     window: &mut GlfwWindow,
     renderer: &mut GlRenderer,
+    input_bindings: &InputBindings,
     event: WindowEvent,
     pending_cmds: &mut VecDeque<String>,
 ) -> bool {
@@ -308,7 +317,7 @@ fn handle_window_event(
             false
         }
         WindowEvent::Key { key, action } => {
-            if let Some(cmd) = crate::input::map_key_action(key, action) {
+            if let Some(cmd) = input_bindings.command_for(key, action) {
                 pending_cmds.push_back(cmd);
             }
             if key == Key::Escape && action == Action::Press {
@@ -371,15 +380,37 @@ mod tests {
     fn window_close_event_triggers_exit() {
         let mut window = GlfwWindow::new(WindowConfig::default());
         let mut renderer = GlRenderer::new(RendererConfig::default());
+        let bindings = InputBindings::default();
         let mut pending = VecDeque::new();
         let exit = handle_window_event(
             &mut window,
             &mut renderer,
+            &bindings,
             WindowEvent::CloseRequested,
             &mut pending,
         );
         assert!(exit);
         assert!(window.should_close());
+    }
+
+    #[test]
+    fn key_event_pushes_command() {
+        let mut window = GlfwWindow::new(WindowConfig::default());
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let bindings = InputBindings::default();
+        let mut pending = VecDeque::new();
+        let exit = handle_window_event(
+            &mut window,
+            &mut renderer,
+            &bindings,
+            WindowEvent::Key {
+                key: Key::Up,
+                action: Action::Press,
+            },
+            &mut pending,
+        );
+        assert!(!exit);
+        assert_eq!(pending.pop_front(), Some("+forward".to_string()));
     }
 
     #[test]
