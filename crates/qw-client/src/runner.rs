@@ -143,6 +143,7 @@ impl ClientRunner {
                 }
                 self.state.apply_message(message, incoming_sequence);
                 self.handle_signon(message)?;
+                self.maybe_queue_skin_downloads(message)?;
             }
         }
 
@@ -308,6 +309,31 @@ impl ClientRunner {
                     self.state.serverinfo.set_raw(info);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn maybe_queue_skin_downloads(&mut self, message: &SvcMessage) -> Result<(), RunnerError> {
+        if self.signon_phase != SignonPhase::Done {
+            return Ok(());
+        }
+
+        let should_check = match message {
+            SvcMessage::UpdateUserInfo { .. } => true,
+            SvcMessage::SetInfo { key, .. } => key.eq_ignore_ascii_case("skin"),
+            _ => false,
+        };
+        if !should_check {
+            return Ok(());
+        }
+
+        let Some(data) = self.state.serverdata.clone() else {
+            return Ok(());
+        };
+        self.ensure_filesystem(&data)?;
+        self.queue_missing_skins()?;
+        if self.download.is_none() {
+            let _ = self.start_next_download()?;
         }
         Ok(())
     }
@@ -1307,5 +1333,63 @@ mod tests {
 
         assert_eq!(runner.download_queue.len(), 1);
         assert_eq!(runner.download_seen.len(), 1);
+    }
+
+    #[test]
+    fn queues_skin_downloads_after_userinfo() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let net = NetClient::connect(server_addr).unwrap();
+        let mut session = Session::new(27001, "\\name\\player");
+        session.state = SessionState::Connected;
+        let mut runner = ClientRunner::new(net, session);
+
+        let dir = temp_dir();
+        runner.client.fs.add_game_dir(&dir).unwrap();
+        runner.fs_game_dir = Some("id1".to_string());
+        runner.signon_phase = SignonPhase::Done;
+        runner.state.serverdata = Some(ServerData {
+            protocol: qw_common::PROTOCOL_VERSION,
+            server_count: 1,
+            game_dir: "id1".to_string(),
+            player_num: 0,
+            spectator: false,
+            level_name: "start".to_string(),
+            movevars: qw_common::MoveVars {
+                gravity: 800.0,
+                stopspeed: 100.0,
+                maxspeed: 320.0,
+                spectatormaxspeed: 500.0,
+                accelerate: 10.0,
+                airaccelerate: 12.0,
+                wateraccelerate: 8.0,
+                friction: 4.0,
+                waterfriction: 2.0,
+                entgravity: 1.0,
+            },
+        });
+        runner
+            .state
+            .players
+            .get_mut(0)
+            .unwrap()
+            .userinfo
+            .set("skin", "base")
+            .unwrap();
+
+        runner
+            .maybe_queue_skin_downloads(&SvcMessage::UpdateUserInfo {
+                slot: 0,
+                user_id: 1,
+                userinfo: "\\name\\unit\\skin\\base".to_string(),
+            })
+            .unwrap();
+
+        let download = runner.download.as_ref().expect("expected download to start");
+        let expected = std::path::Path::new("skins").join("base.pcx");
+        assert!(download.final_path.ends_with(&expected));
+        assert!(runner.download_queue.is_empty());
+
+        std::fs::remove_dir_all(dir).ok();
     }
 }
