@@ -1,3 +1,4 @@
+mod cli;
 mod client;
 mod config;
 mod handshake;
@@ -7,46 +8,147 @@ mod runner;
 mod session;
 mod state;
 
-fn main() {
-    println!("RustQuake client stub");
-    match qw_common::locate_data_dir() {
-        Ok(dir) => {
-            println!("Data dir: {}", dir.display());
-            if let Some(id1) = qw_common::find_id1_dir(&dir) {
-                println!("id1 dir: {}", id1.display());
-                let mut fs = qw_common::QuakeFs::new();
-                if let Err(err) = fs.add_game_dir(&id1) {
-                    println!("Failed to add game dir: {:?}", err);
-                    return;
-                }
-                if fs.contains("gfx.wad") {
-                    println!("Found gfx.wad");
-                    match fs.read("gfx.wad") {
-                        Ok(bytes) => match qw_common::Wad::from_bytes(bytes) {
-                            Ok(wad) => println!("gfx.wad lumps: {}", wad.entries().len()),
-                            Err(err) => println!("Failed to parse gfx.wad: {:?}", err),
-                        },
-                        Err(err) => println!("Failed to read gfx.wad: {:?}", err),
-                    }
-                } else {
-                    println!("gfx.wad not found");
-                }
+use std::time::{Duration, Instant};
 
-                if fs.contains("maps/start.bsp") {
-                    match fs.read("maps/start.bsp") {
-                        Ok(bytes) => match qw_common::Bsp::from_bytes(bytes) {
-                            Ok(bsp) => println!("start.bsp version: {}", bsp.version),
-                            Err(err) => println!("Failed to parse start.bsp: {:?}", err),
-                        },
-                        Err(err) => println!("Failed to read start.bsp: {:?}", err),
-                    }
+use crate::cli::{CliAction, DEFAULT_QPORT};
+use crate::config::ClientConfig;
+use crate::net::NetClient;
+use crate::runner::{ClientRunner, RunnerError};
+use crate::session::{Session, SessionState};
+use qw_common::UserCmd;
+
+const MOVE_INTERVAL_MS: u64 = 50;
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), AppError> {
+    let action = cli::parse_args(std::env::args().skip(1))?;
+    let args = match action {
+        CliAction::Help => {
+            println!("{}", cli::usage());
+            return Ok(());
+        }
+        CliAction::Run(args) => args,
+    };
+
+    if let Some(path) = args.data_dir.as_deref() {
+        // Safety: env var mutation is process-global; caller owns process.
+        unsafe {
+            std::env::set_var("RUSTQUAKE_DATA_DIR", path);
+        }
+    }
+    if let Some(path) = args.download_dir.as_deref() {
+        // Safety: env var mutation is process-global; caller owns process.
+        unsafe {
+            std::env::set_var("RUSTQUAKE_DOWNLOAD_DIR", path);
+        }
+    }
+
+    let mut config = ClientConfig::default();
+    if let Some(name) = args.name.as_deref() {
+        config.userinfo.set("name", name)?;
+    }
+    if let Some(topcolor) = args.topcolor.as_deref() {
+        config.userinfo.set("topcolor", topcolor)?;
+    }
+    if let Some(bottomcolor) = args.bottomcolor.as_deref() {
+        config.userinfo.set("bottomcolor", bottomcolor)?;
+    }
+    if let Some(rate) = args.rate.as_deref() {
+        config.userinfo.set("rate", rate)?;
+    }
+
+    let server_addr = std::net::SocketAddr::from(args.server.to_socket_addr());
+    let net = NetClient::connect(server_addr)?;
+    let qport = if args.qport == 0 {
+        DEFAULT_QPORT
+    } else {
+        args.qport
+    };
+    let session = Session::new(qport, config.userinfo.as_str().to_string());
+    let mut runner = ClientRunner::new(net, session);
+    runner.start_connect()?;
+
+    let mut last_move = Instant::now();
+    let mut buf = [0u8; 8192];
+    let mut was_connected = false;
+    loop {
+        if let Some(packet) = runner.poll_once(&mut buf)? {
+            if let crate::client::ClientPacket::Messages(_) = packet {
+                for (level, message) in runner.state.prints.drain(..) {
+                    println!("[{level}] {message}");
                 }
-            } else {
-                println!("id1 directory not found under data dir.");
+                for message in runner.state.center_prints.drain(..) {
+                    println!("[center] {message}");
+                }
             }
         }
-        Err(_) => {
-            println!("Data dir not configured. See docs/data-paths.md.");
+
+        if runner.session.state == SessionState::Connected {
+            was_connected = true;
+            let elapsed = last_move.elapsed();
+            if elapsed >= Duration::from_millis(MOVE_INTERVAL_MS) {
+                let mut cmd = UserCmd::default();
+                let msec = elapsed.as_millis().min(u128::from(u8::MAX)) as u8;
+                cmd.msec = msec;
+                cmd.angles = runner.state.view_angles;
+                runner.send_move(cmd)?;
+                last_move = Instant::now();
+            }
+        } else if runner.session.state == SessionState::Disconnected && was_connected {
+            break;
         }
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+enum AppError {
+    Cli(cli::CliError),
+    Runner(RunnerError),
+    Info(qw_common::InfoError),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppError::Cli(err) => write!(f, "{}", err),
+            AppError::Runner(err) => write!(f, "{:?}", err),
+            AppError::Info(err) => write!(f, "{}", err),
+            AppError::Io(err) => write!(f, "{}", err),
+        }
+    }
+}
+
+impl From<cli::CliError> for AppError {
+    fn from(err: cli::CliError) -> Self {
+        AppError::Cli(err)
+    }
+}
+
+impl From<RunnerError> for AppError {
+    fn from(err: RunnerError) -> Self {
+        AppError::Runner(err)
+    }
+}
+
+impl From<qw_common::InfoError> for AppError {
+    fn from(err: qw_common::InfoError) -> Self {
+        AppError::Info(err)
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(err: std::io::Error) -> Self {
+        AppError::Io(err)
     }
 }
