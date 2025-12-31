@@ -136,6 +136,19 @@ pub struct RenderDrawList {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct UiText {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub color: [u8; 4],
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UiLayer {
+    pub texts: Vec<UiText>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct GpuTexture {
     pub width: u32,
     pub height: u32,
@@ -275,6 +288,7 @@ pub struct GlRenderer {
     last_world: Option<RenderWorld>,
     entities: Vec<RenderEntity>,
     gpu_world: Option<GpuWorld>,
+    ui: UiLayer,
 }
 
 impl GlRenderer {
@@ -286,6 +300,7 @@ impl GlRenderer {
             last_world: None,
             entities: Vec::new(),
             gpu_world: None,
+            ui: UiLayer::default(),
         }
     }
 
@@ -317,6 +332,14 @@ impl GlRenderer {
     pub fn draw_list(&self) -> Option<RenderDrawList> {
         let world = self.last_world.as_ref()?;
         Some(build_draw_list(world, &self.entities))
+    }
+
+    pub fn set_ui(&mut self, ui: UiLayer) {
+        self.ui = ui;
+    }
+
+    pub fn ui(&self) -> &UiLayer {
+        &self.ui
     }
 
     pub fn gpu_world(&self) -> Option<&GpuWorld> {
@@ -663,6 +686,21 @@ mod tests {
         );
         renderer.set_world(world.clone());
         assert_eq!(renderer.world(), Some(&world));
+    }
+
+    #[test]
+    fn stores_ui_state() {
+        let mut renderer = GlRenderer::new(RendererConfig::default());
+        let ui = UiLayer {
+            texts: vec![UiText {
+                text: "Loading...".to_string(),
+                x: 10,
+                y: 20,
+                color: [255, 255, 255, 255],
+            }],
+        };
+        renderer.set_ui(ui.clone());
+        assert_eq!(renderer.ui(), &ui);
     }
 
     #[test]

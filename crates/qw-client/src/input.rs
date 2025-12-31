@@ -49,6 +49,7 @@ impl Default for InputBindings {
         bindings.bind_toggle(Key::Left, "moveleft");
         bindings.bind_toggle(Key::Right, "moveright");
         bindings.bind_toggle(Key::Space, "jump");
+        bindings.bind_toggle(Key::Tab, "showscores");
         bindings.bind_toggle(Key::Shift, "speed");
         bindings.bind_toggle(Key::Mouse1, "attack");
         bindings.bind_command(Key::Enter, "messagemode");
@@ -82,6 +83,7 @@ pub struct InputState {
     attack: bool,
     speed: bool,
     impulse: Option<u8>,
+    showscores: bool,
 }
 
 impl InputState {
@@ -147,6 +149,10 @@ impl InputState {
         cmd
     }
 
+    pub fn showscores(&self) -> bool {
+        self.showscores
+    }
+
     fn handle_toggle(&mut self, base: &str, pressed: bool) -> CommandTarget {
         match base {
             "forward" => self.forward = pressed,
@@ -158,6 +164,7 @@ impl InputState {
             "jump" => self.jump = pressed,
             "attack" => self.attack = pressed,
             "speed" => self.speed = pressed,
+            "showscores" => self.showscores = pressed,
             _ => return CommandTarget::Server,
         }
         CommandTarget::Local
@@ -237,6 +244,16 @@ mod tests {
         assert_eq!(state.apply_command("impulse 5"), CommandTarget::Local);
         let cmd = state.build_usercmd();
         assert_eq!(cmd.impulse, 5);
+    }
+
+    #[test]
+    fn toggles_scoreboard_state() {
+        let mut state = InputState::default();
+        assert!(!state.showscores());
+        state.apply_command("+showscores");
+        assert!(state.showscores());
+        state.apply_command("-showscores");
+        assert!(!state.showscores());
     }
 
     #[test]

@@ -24,9 +24,12 @@ use crate::session::{Session, SessionState};
 use crate::sound::SoundManager;
 use crate::state::ClientState;
 use qw_audio::{AudioConfig, AudioSystem};
-use qw_common::{InfoError, InfoString, UPDATE_MASK};
+use qw_common::{
+    InfoError, InfoString, STAT_AMMO, STAT_ARMOR, STAT_HEALTH, UPDATE_MASK, value_for_key,
+};
 use qw_renderer_gl::{
     GlRenderer, RenderEntity, RenderEntityKind, RenderView, RenderWorld, Renderer, RendererConfig,
+    UiLayer, UiText,
 };
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
@@ -228,6 +231,7 @@ fn run() -> Result<(), AppError> {
             let incoming = runner.client.netchan.incoming_sequence();
             let render_time = runner.time_seconds() - runner.state.latency;
             renderer.set_entities(build_render_entities(&runner.state, incoming, render_time));
+            renderer.set_ui(build_ui_layer(&runner.state, input_state.showscores()));
             renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
             renderer.end_frame();
@@ -487,6 +491,65 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
     } else {
         RenderEntityKind::Alias
     }
+}
+
+fn build_ui_layer(state: &ClientState, show_scores: bool) -> UiLayer {
+    let mut texts = Vec::new();
+    if state.render_world.is_none() {
+        texts.push(UiText {
+            text: "Loading...".to_string(),
+            x: 10,
+            y: 10,
+            color: [255, 255, 255, 255],
+        });
+    }
+
+    let health = state.stats[STAT_HEALTH];
+    let armor = state.stats[STAT_ARMOR];
+    let ammo = state.stats[STAT_AMMO];
+    texts.push(UiText {
+        text: format!("Health: {health}"),
+        x: 10,
+        y: 30,
+        color: [255, 80, 80, 255],
+    });
+    texts.push(UiText {
+        text: format!("Armor: {armor}"),
+        x: 10,
+        y: 44,
+        color: [80, 160, 255, 255],
+    });
+    texts.push(UiText {
+        text: format!("Ammo: {ammo}"),
+        x: 10,
+        y: 58,
+        color: [255, 255, 160, 255],
+    });
+
+    if show_scores {
+        let mut entries = Vec::new();
+        for player in &state.players {
+            let name = value_for_key(player.userinfo.as_str(), "name").unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            entries.push((player.frags, player.ping, name));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let mut y = 80;
+        for (frags, ping, name) in entries.into_iter().take(8) {
+            texts.push(UiText {
+                text: format!("{frags:>3} {name} ({ping})"),
+                x: 10,
+                y,
+                color: [255, 255, 255, 255],
+            });
+            y += 12;
+        }
+    }
+
+    UiLayer { texts }
 }
 
 fn interpolation_fraction(now: f64, previous: f64, current: f64) -> f32 {
