@@ -5,14 +5,17 @@ pub fn skip_path(path: &str) -> &str {
 }
 
 pub fn strip_extension(path: &str) -> String {
-    let mut out = String::new();
-    for ch in path.chars() {
+    let mut end = path.len();
+    for (i, ch) in path.char_indices().rev() {
         if ch == '.' {
+            end = i;
             break;
         }
-        out.push(ch);
+        if ch == '/' || ch == '\\' {
+            break;
+        }
     }
-    out
+    path[..end].to_string()
 }
 
 pub fn file_extension(path: &str) -> String {
@@ -102,6 +105,10 @@ mod tests {
     #[test]
     fn strips_extension() {
         assert_eq!(strip_extension("maps/e1m1.bsp"), "maps/e1m1");
+        assert_eq!(
+            strip_extension("skins/player.test.pcx"),
+            "skins/player.test"
+        );
     }
 
     #[test]
