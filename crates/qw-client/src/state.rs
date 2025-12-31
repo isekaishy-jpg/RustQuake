@@ -90,6 +90,9 @@ pub struct ClientState {
     pub next_model: Option<u8>,
     pub view_entity: Option<u16>,
     pub view_angles: Vec3,
+    pub sim_origin: Vec3,
+    pub sim_velocity: Vec3,
+    pub sim_angles: Vec3,
     pub server_version: Option<i32>,
     pub stats: [i32; MAX_CL_STATS],
     pub lightstyles: Vec<String>,
@@ -139,6 +142,9 @@ impl ClientState {
             next_model: None,
             view_entity: None,
             view_angles: Vec3::default(),
+            sim_origin: Vec3::default(),
+            sim_velocity: Vec3::default(),
+            sim_angles: Vec3::default(),
             server_version: None,
             stats: [0; MAX_CL_STATS],
             lightstyles: vec![String::new(); MAX_LIGHTSTYLES],
@@ -174,6 +180,9 @@ impl ClientState {
                 self.server_version = None;
                 self.view_entity = None;
                 self.view_angles = Vec3::default();
+                self.sim_origin = Vec3::default();
+                self.sim_velocity = Vec3::default();
+                self.sim_angles = Vec3::default();
                 self.server_time = 0.0;
                 self.paused = false;
                 self.next_sound = None;
@@ -528,6 +537,95 @@ impl ClientState {
         out.velocity = pmove.velocity;
         out.onground = pmove.onground;
         Some(out)
+    }
+
+    pub fn predict_move(&mut self, incoming_sequence: u32, outgoing_sequence: u32, now: f64) {
+        if self.paused || self.intermission.is_some() {
+            return;
+        }
+        let Some(data) = &self.serverdata else {
+            return;
+        };
+        if self.valid_sequence == 0 {
+            return;
+        }
+        if outgoing_sequence.wrapping_sub(incoming_sequence) >= (UPDATE_BACKUP as u32 - 1) {
+            return;
+        }
+
+        let player_num = data.player_num as usize;
+        let spectator = data.spectator;
+        let mut from_seq = incoming_sequence;
+        let mut from_state =
+            self.frames[(incoming_sequence as usize) & UPDATE_MASK].playerstate[player_num];
+        let mut to_state = None;
+        let mut to_seq = None;
+
+        for i in 1..(UPDATE_BACKUP - 1) {
+            let seq = incoming_sequence.wrapping_add(i as u32);
+            if seq >= outgoing_sequence {
+                break;
+            }
+            let index = (seq as usize) & UPDATE_MASK;
+            let cmd = self.frames[index].cmd;
+            let Some(predicted) = self.predict_usercmd(&from_state, cmd, spectator) else {
+                break;
+            };
+            self.frames[index].playerstate[player_num] = predicted;
+            to_state = Some(predicted);
+            to_seq = Some(seq);
+            if self.frames[index].senttime >= now {
+                break;
+            }
+            from_state = predicted;
+            from_seq = seq;
+        }
+
+        let Some(to_state) = to_state else {
+            self.sim_origin = from_state.origin;
+            self.sim_velocity = from_state.velocity;
+            self.sim_angles = from_state.viewangles;
+            return;
+        };
+
+        let from_time = self.frames[(from_seq as usize) & UPDATE_MASK].senttime;
+        let to_time = self.frames[(to_seq.unwrap() as usize) & UPDATE_MASK].senttime;
+        let mut frac = if to_time == from_time {
+            0.0
+        } else {
+            (now - from_time) / (to_time - from_time)
+        };
+        if frac < 0.0 {
+            frac = 0.0;
+        }
+        if frac > 1.0 {
+            frac = 1.0;
+        }
+        let frac = frac as f32;
+
+        let delta = Vec3::new(
+            (from_state.origin.x - to_state.origin.x).abs(),
+            (from_state.origin.y - to_state.origin.y).abs(),
+            (from_state.origin.z - to_state.origin.z).abs(),
+        );
+        if delta.x > 128.0 || delta.y > 128.0 || delta.z > 128.0 {
+            self.sim_origin = to_state.origin;
+            self.sim_velocity = to_state.velocity;
+            self.sim_angles = to_state.viewangles;
+            return;
+        }
+
+        self.sim_origin = Vec3::new(
+            from_state.origin.x + frac * (to_state.origin.x - from_state.origin.x),
+            from_state.origin.y + frac * (to_state.origin.y - from_state.origin.y),
+            from_state.origin.z + frac * (to_state.origin.z - from_state.origin.z),
+        );
+        self.sim_velocity = Vec3::new(
+            from_state.velocity.x + frac * (to_state.velocity.x - from_state.velocity.x),
+            from_state.velocity.y + frac * (to_state.velocity.y - from_state.velocity.y),
+            from_state.velocity.z + frac * (to_state.velocity.z - from_state.velocity.z),
+        );
+        self.sim_angles = from_state.viewangles;
     }
 
     pub fn clear_frame_events(&mut self) {

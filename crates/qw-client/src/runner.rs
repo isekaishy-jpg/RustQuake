@@ -145,6 +145,9 @@ impl ClientRunner {
                 self.handle_signon(message)?;
                 self.maybe_queue_skin_downloads(message)?;
             }
+            let outgoing_sequence = self.client.netchan.outgoing_sequence();
+            self.state
+                .predict_move(incoming_sequence, outgoing_sequence, now);
         }
 
         Ok(Some(parsed))
