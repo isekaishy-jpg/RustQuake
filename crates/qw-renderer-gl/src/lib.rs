@@ -63,6 +63,25 @@ pub struct RenderLightmap {
     pub samples: Vec<Vec<u8>>,
 }
 
+impl RenderLightmap {
+    pub fn combined_samples(&self, lightstyles: &[String], time: f32) -> Vec<u8> {
+        let size = (self.width * self.height) as usize;
+        let mut out = vec![0u8; size];
+        for (style_index, style_id) in self.styles.iter().enumerate() {
+            let scale = style_value(lightstyles, *style_id, time);
+            let samples = match self.samples.get(style_index) {
+                Some(samples) => samples,
+                None => continue,
+            };
+            for (idx, value) in samples.iter().take(size).enumerate() {
+                let sum = out[idx] as f32 + *value as f32 * scale;
+                out[idx] = sum.min(255.0).round() as u8;
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct LightmapBasis {
     min_s: f32,
@@ -387,6 +406,22 @@ fn lightmap_basis(verts: &[FaceVertex]) -> Option<LightmapBasis> {
     })
 }
 
+fn style_value(lightstyles: &[String], style_id: u8, time: f32) -> f32 {
+    let style = lightstyles
+        .get(style_id as usize)
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    if style.is_empty() {
+        return 1.0;
+    }
+    let index = ((time * 10.0) as usize) % style.len();
+    let byte = style.as_bytes()[index];
+    if byte < b'a' {
+        return 1.0;
+    }
+    (byte.saturating_sub(b'a') as f32) / 25.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +626,20 @@ mod tests {
         assert_eq!(lightmap.styles, vec![0]);
         assert_eq!(lightmap.samples[0].len(), 9);
         assert_eq!(lightmap.samples[0][0], 1);
+    }
+
+    #[test]
+    fn combines_lightmap_styles() {
+        let lightmap = RenderLightmap {
+            width: 1,
+            height: 1,
+            styles: vec![0],
+            samples: vec![vec![50]],
+        };
+        let mut styles = vec![String::new(); 1];
+        styles[0] = "z".to_string();
+        let combined = lightmap.combined_samples(&styles, 0.0);
+        assert_eq!(combined, vec![50]);
     }
 
     #[test]
