@@ -1,5 +1,5 @@
-use qw_common::Vec3;
-use qw_qc::{Vm, VmError};
+use qw_common::{Entity, Vec3};
+use qw_qc::{QcType, Vm, VmError};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -53,6 +53,17 @@ pub fn configure_vm(vm: &mut Vm, mapname: &str) -> Result<(), VmError> {
 
     init_globals(vm, mapname)?;
     register_builtins(vm);
+    Ok(())
+}
+
+pub fn apply_worldspawn(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
+    let Some(worldspawn) = entities
+        .iter()
+        .find(|entity| entity.get("classname") == Some("worldspawn"))
+    else {
+        return Ok(());
+    };
+    apply_entity_pairs(vm, 0, worldspawn)?;
     Ok(())
 }
 
@@ -465,6 +476,69 @@ fn vec_sub(a: Vec3, b: Vec3) -> Vec3 {
 
 fn vec_scale(a: Vec3, scale: f32) -> Vec3 {
     Vec3::new(a.x * scale, a.y * scale, a.z * scale)
+}
+
+fn apply_entity_pairs(vm: &mut Vm, ent: usize, entity: &Entity) -> Result<(), VmError> {
+    for (key, value) in entity.pairs() {
+        if key.starts_with('_') {
+            continue;
+        }
+
+        if key.eq_ignore_ascii_case("angle") {
+            apply_angle_field(vm, ent, value);
+            continue;
+        }
+
+        let Some(def) = vm.field_def(key) else {
+            continue;
+        };
+        if def.offset < 0 {
+            continue;
+        }
+        let field = def.offset as usize;
+
+        match def.ty {
+            QcType::String => {
+                let offset = vm.alloc_string(value)?;
+                vm.write_edict_field_raw(ent, field, &[offset as u32])?;
+            }
+            QcType::Float | QcType::Integer | QcType::Entity => {
+                if let Ok(parsed) = value.trim().parse::<f32>() {
+                    vm.write_edict_field_f32(ent, field, parsed)?;
+                }
+            }
+            QcType::Vector => {
+                if let Some(vec) = parse_vec3(value) {
+                    vm.write_edict_field_vec(ent, field, vec)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn apply_angle_field(vm: &mut Vm, ent: usize, value: &str) {
+    let Some(def) = vm.field_def("angles") else {
+        return;
+    };
+    if def.offset < 0 {
+        return;
+    }
+    let field = def.offset as usize;
+    let angle = value.trim().parse::<f32>().unwrap_or(0.0);
+    let angles = Vec3::new(0.0, angle, 0.0);
+    let _ = vm.write_edict_field_vec(ent, field, angles);
+}
+
+fn parse_vec3(value: &str) -> Option<Vec3> {
+    let mut iter = value
+        .split(|ch: char| ch == ' ' || ch == '\t')
+        .filter(|part| !part.is_empty());
+    let x = iter.next()?.parse::<f32>().ok()?;
+    let y = iter.next()?.parse::<f32>().ok()?;
+    let z = iter.next()?.parse::<f32>().ok()?;
+    Some(Vec3::new(x, y, z))
 }
 
 fn push_unique(list: &mut Vec<String>, value: String) {

@@ -1,4 +1,7 @@
-use qw_common::{DataPathError, FsError, QuakeFs, find_game_dir, find_id1_dir, locate_data_dir};
+use qw_common::{
+    Bsp, BspError, DataPathError, Entity, EntityError, FsError, QuakeFs, find_game_dir,
+    find_id1_dir, locate_data_dir, parse_entities,
+};
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::env;
 
@@ -42,6 +45,15 @@ fn run() -> Result<(), ServerError> {
         println!("[server] qc main not executed: {err:?}");
     }
 
+    if let Ok(entities) = load_map_entities(&fs, &map_name) {
+        if let Err(err) = qc::apply_worldspawn(&mut vm, &entities) {
+            println!("[server] qc worldspawn not applied: {err:?}");
+        }
+        if let Err(err) = vm.call_by_name("worldspawn", 10_000) {
+            println!("[server] qc worldspawn not executed: {err:?}");
+        }
+    }
+
     Ok(())
 }
 
@@ -51,6 +63,8 @@ enum ServerError {
     Fs(FsError),
     Progs(ProgsError),
     Vm(VmError),
+    Bsp(BspError),
+    Entities(EntityError),
     GameDirMissing,
     ProgsMissing,
 }
@@ -62,8 +76,18 @@ impl std::fmt::Display for ServerError {
             ServerError::Fs(err) => write!(f, "fs error: {:?}", err),
             ServerError::Progs(err) => write!(f, "progs error: {:?}", err),
             ServerError::Vm(err) => write!(f, "vm error: {:?}", err),
+            ServerError::Bsp(err) => write!(f, "bsp error: {}", err),
+            ServerError::Entities(err) => write!(f, "entity parse error: {:?}", err),
             ServerError::GameDirMissing => write!(f, "game directory not found"),
             ServerError::ProgsMissing => write!(f, "progs.dat or qwprogs.dat not found"),
         }
     }
+}
+
+fn load_map_entities(fs: &QuakeFs, map_name: &str) -> Result<Vec<Entity>, ServerError> {
+    let map_path = format!("maps/{map_name}.bsp");
+    let bytes = fs.read(&map_path).map_err(ServerError::Fs)?;
+    let bsp = Bsp::from_bytes(bytes).map_err(ServerError::Bsp)?;
+    let text = bsp.entities_text().map_err(ServerError::Bsp)?;
+    parse_entities(&text).map_err(ServerError::Entities)
 }
