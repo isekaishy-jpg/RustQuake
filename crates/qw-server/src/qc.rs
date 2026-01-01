@@ -17,6 +17,13 @@ pub struct ServerQcContext {
     fields: QcFields,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ServerQcSnapshot {
+    pub precache_models: Vec<String>,
+    pub precache_sounds: Vec<String>,
+    pub lightstyles: Vec<Option<String>>,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct AmbientSound {
@@ -105,6 +112,17 @@ pub fn configure_vm(vm: &mut Vm, mapname: &str) -> Result<(), VmError> {
     init_globals(vm, mapname)?;
     register_builtins(vm);
     Ok(())
+}
+
+pub fn snapshot(vm: &Vm) -> ServerQcSnapshot {
+    let Some(ctx) = vm.context_ref::<ServerQcContext>() else {
+        return ServerQcSnapshot::default();
+    };
+    ServerQcSnapshot {
+        precache_models: ctx.precache_models.clone(),
+        precache_sounds: ctx.precache_sounds.clone(),
+        lightstyles: ctx.lightstyles.clone(),
+    }
 }
 
 pub fn apply_worldspawn(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
