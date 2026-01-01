@@ -129,6 +129,12 @@ impl ProgsDat {
             .find(|def| def.name.eq_ignore_ascii_case(name))
     }
 
+    pub fn field_def(&self, name: &str) -> Option<&Definition> {
+        self.field_defs
+            .iter()
+            .find(|def| def.name.eq_ignore_ascii_case(name))
+    }
+
     pub fn string_at(&self, offset: i32) -> Result<String, ProgsError> {
         read_cstring(&self.strings, offset)
     }
@@ -206,6 +212,29 @@ impl Vm {
         self.builtins[index] = Some(func);
     }
 
+    pub fn global_def(&self, name: &str) -> Option<&Definition> {
+        self.progs.global_def(name)
+    }
+
+    pub fn field_def(&self, name: &str) -> Option<&Definition> {
+        self.progs.field_def(name)
+    }
+
+    pub fn edict_field_count(&self) -> usize {
+        self.progs.entity_fields.max(0) as usize
+    }
+
+    pub fn edict_count(&self) -> usize {
+        self.edicts.len()
+    }
+
+    pub fn alloc_edict(&mut self) -> usize {
+        let index = self.edicts.len();
+        let field_count = self.edict_field_count();
+        self.edicts.push(Edict::new(field_count));
+        index
+    }
+
     pub fn call_by_name(&mut self, name: &str, max_steps: usize) -> VmResult<()> {
         let index = self
             .progs
@@ -217,6 +246,98 @@ impl Vm {
     pub fn call_function(&mut self, index: usize, max_steps: usize) -> VmResult<()> {
         self.enter_function(index, None)?;
         self.execute(max_steps)
+    }
+
+    pub fn read_global_raw(&self, ofs: i16) -> VmResult<u32> {
+        self.read_raw(ofs)
+    }
+
+    pub fn write_global_raw(&mut self, ofs: i16, value: u32) -> VmResult<()> {
+        self.write_raw(ofs, value)
+    }
+
+    pub fn read_global_f32(&self, ofs: i16) -> VmResult<f32> {
+        self.read_f32(ofs)
+    }
+
+    pub fn write_global_f32(&mut self, ofs: i16, value: f32) -> VmResult<()> {
+        self.write_f32(ofs, value)
+    }
+
+    pub fn read_global_vec(&self, ofs: i16) -> VmResult<Vec3> {
+        self.read_vec(ofs)
+    }
+
+    pub fn write_global_vec(&mut self, ofs: i16, value: Vec3) -> VmResult<()> {
+        self.write_vec(ofs, value)
+    }
+
+    pub fn read_edict_field_raw(
+        &self,
+        entity: usize,
+        field: usize,
+        count: usize,
+    ) -> VmResult<Vec<u32>> {
+        self.edict_field(entity, field, count)
+    }
+
+    pub fn write_edict_field_raw(
+        &mut self,
+        entity: usize,
+        field: usize,
+        values: &[u32],
+    ) -> VmResult<()> {
+        let edict = self
+            .edicts
+            .get_mut(entity)
+            .ok_or(VmError::BadEdict(entity as i32))?;
+        let end = field + values.len();
+        if end > edict.fields.len() {
+            return Err(VmError::BadField(field as i32));
+        }
+        edict.fields[field..end].copy_from_slice(values);
+        Ok(())
+    }
+
+    pub fn read_edict_field_f32(&self, entity: usize, field: usize) -> VmResult<f32> {
+        let value = self
+            .read_edict_field_raw(entity, field, 1)?
+            .first()
+            .copied()
+            .unwrap_or(0);
+        Ok(f32::from_bits(value))
+    }
+
+    pub fn write_edict_field_f32(
+        &mut self,
+        entity: usize,
+        field: usize,
+        value: f32,
+    ) -> VmResult<()> {
+        let values = [value.to_bits()];
+        self.write_edict_field_raw(entity, field, &values)
+    }
+
+    pub fn read_edict_field_vec(&self, entity: usize, field: usize) -> VmResult<Vec3> {
+        let values = self.read_edict_field_raw(entity, field, 3)?;
+        let x = values.first().copied().unwrap_or(0);
+        let y = values.get(1).copied().unwrap_or(0);
+        let z = values.get(2).copied().unwrap_or(0);
+        Ok(Vec3::new(
+            f32::from_bits(x),
+            f32::from_bits(y),
+            f32::from_bits(z),
+        ))
+    }
+
+    pub fn write_edict_field_vec(
+        &mut self,
+        entity: usize,
+        field: usize,
+        value: Vec3,
+    ) -> VmResult<()> {
+        let values = [value.x.to_bits(), value.y.to_bits(), value.z.to_bits()];
+        self.write_edict_field_raw(entity, field, &values)
     }
 
     fn execute(&mut self, max_steps: usize) -> VmResult<()> {
@@ -993,5 +1114,39 @@ mod tests {
         assert_eq!(read_cstring(bytes, 1).unwrap(), "hello");
         assert_eq!(read_cstring(bytes, 7).unwrap(), "world");
         assert_eq!(read_cstring(bytes, 0).unwrap(), "");
+    }
+
+    #[test]
+    fn vm_allocates_edicts_and_reads_globals() {
+        let progs = ProgsDat {
+            version: PROG_VERSION,
+            crc: 0,
+            statements: Vec::new(),
+            global_defs: Vec::new(),
+            field_defs: Vec::new(),
+            functions: Vec::new(),
+            strings: Vec::new(),
+            globals: vec![0; 16],
+            entity_fields: 6,
+        };
+
+        let mut vm = Vm::new(progs);
+        assert_eq!(vm.edict_count(), 1);
+        let entity = vm.alloc_edict();
+        assert_eq!(entity, 1);
+        assert_eq!(vm.edict_count(), 2);
+
+        vm.write_global_f32(0, 2.5).unwrap();
+        assert_eq!(vm.read_global_f32(0).unwrap(), 2.5);
+
+        let vec = Vec3::new(1.0, 2.0, 3.0);
+        vm.write_global_vec(1, vec).unwrap();
+        assert_eq!(vm.read_global_vec(1).unwrap(), vec);
+
+        vm.write_edict_field_f32(entity, 0, 4.0).unwrap();
+        assert_eq!(vm.read_edict_field_f32(entity, 0).unwrap(), 4.0);
+
+        vm.write_edict_field_vec(entity, 1, vec).unwrap();
+        assert_eq!(vm.read_edict_field_vec(entity, 1).unwrap(), vec);
     }
 }
