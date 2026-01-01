@@ -2,6 +2,8 @@
 use glow::HasContext;
 #[cfg(feature = "glow")]
 use qw_common::{AliasModel, MdlFrame, SpriteImage, Vec3};
+#[cfg(feature = "glow")]
+use qw_renderer::RenderSurface;
 use qw_renderer::{
     RenderDrawList, RenderEntity, RenderModel, RenderVertex, RenderView, RenderWorld, Renderer,
     RendererConfig, ResolvedEntity, UiLayer, build_draw_list,
@@ -296,6 +298,8 @@ struct GlProgram {
     base_sampler: Option<glow::UniformLocation>,
     lightmap_sampler: Option<glow::UniformLocation>,
     debug_mode: Option<glow::UniformLocation>,
+    time: Option<glow::UniformLocation>,
+    surface_mode: Option<glow::UniformLocation>,
 }
 
 #[cfg(feature = "glow")]
@@ -309,29 +313,43 @@ layout (location = 2) in vec2 a_light_uv;
 
 uniform mat4 u_view_proj;
 uniform mat4 u_model;
+uniform float u_time;
+uniform int u_surface_mode;
 
 out vec2 v_uv;
 out vec2 v_light_uv;
+out vec3 v_pos;
 
 void main() {
     v_uv = a_uv;
     v_light_uv = a_light_uv;
+    v_pos = a_pos;
     gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
 }
 "#;
         let fragment_source = r#"#version 330 core
 in vec2 v_uv;
 in vec2 v_light_uv;
+in vec3 v_pos;
 
 uniform sampler2D u_base_tex;
 uniform sampler2D u_lightmap_tex;
 uniform int u_debug_mode;
+uniform float u_time;
+uniform int u_surface_mode;
 
 out vec4 frag_color;
 
 void main() {
-    vec4 base = texture(u_base_tex, v_uv);
-    float light = texture(u_lightmap_tex, v_light_uv).r;
+    vec2 uv = v_uv;
+    if (u_surface_mode == 2) {
+        uv.x += sin((uv.y + u_time) * 4.0) * 0.03;
+        uv.y += cos((uv.x + u_time) * 4.0) * 0.03;
+    } else if (u_surface_mode == 1) {
+        uv += vec2(u_time * 0.01, u_time * 0.01);
+    }
+    vec4 base = texture(u_base_tex, uv);
+    float light = u_surface_mode == 1 ? 1.0 : texture(u_lightmap_tex, v_light_uv).r;
     if (u_debug_mode == 1) {
         frag_color = vec4(light, light, light, 1.0);
     } else {
@@ -363,6 +381,8 @@ void main() {
         let base_sampler = gl.get_uniform_location(program, "u_base_tex");
         let lightmap_sampler = gl.get_uniform_location(program, "u_lightmap_tex");
         let debug_mode = gl.get_uniform_location(program, "u_debug_mode");
+        let time = gl.get_uniform_location(program, "u_time");
+        let surface_mode = gl.get_uniform_location(program, "u_surface_mode");
         if let Some(location) = base_sampler.as_ref() {
             gl.uniform_1_i32(Some(location), 0);
         }
@@ -378,6 +398,8 @@ void main() {
             base_sampler,
             lightmap_sampler,
             debug_mode,
+            time,
+            surface_mode,
         }
     }
 }
@@ -1368,6 +1390,12 @@ impl GlRenderer {
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
             }
+            if let Some(location) = gl_state.program.time.as_ref() {
+                gl.uniform_1_f32(Some(location), time);
+            }
+            if let Some(location) = gl_state.program.surface_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
             let debug_mode = if self.debug_lightmap { 1 } else { 0 };
             if let Some(location) = gl_state.program.debug_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), debug_mode);
@@ -1385,6 +1413,10 @@ impl GlRenderer {
                     if !frustum.contains_sphere(surface.bounds.center, surface.bounds.radius) {
                         return;
                     }
+                    if let Some(location) = gl_state.program.surface_mode.as_ref() {
+                        let mode = surface_mode(surface);
+                        gl.uniform_1_i32(Some(location), mode);
+                    }
                 }
                 let Some(draw) = gl_world.draws.get(surface_index) else {
                     return;
@@ -1392,8 +1424,10 @@ impl GlRenderer {
                 if draw.index_count <= 0 {
                     return;
                 }
-                let base = draw
+                let texture_index = draw
                     .texture_index
+                    .and_then(|index| world.animated_texture_index(index, time));
+                let base = texture_index
                     .and_then(|index| gl_world.textures.get(index))
                     .unwrap_or(&gl_state.fallback_base);
                 let lightmap = draw
@@ -1426,7 +1460,11 @@ impl GlRenderer {
                 gl_world,
                 &frustum,
                 false,
+                time,
             );
+            if let Some(location) = gl_state.program.surface_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
             }
@@ -1461,7 +1499,11 @@ impl GlRenderer {
                 gl_world,
                 &frustum,
                 true,
+                time,
             );
+            if let Some(location) = gl_state.program.surface_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
             }
@@ -1504,6 +1546,7 @@ impl GlRenderer {
         gl_world: &GlWorld,
         frustum: &Frustum,
         transparent: bool,
+        time: f32,
     ) {
         let gl = &device.gl;
         for entity in entities {
@@ -1544,6 +1587,12 @@ impl GlRenderer {
                 let Some(surface) = world.surfaces.get(surface_index) else {
                     continue;
                 };
+                if let Some(location) = gl_state.program.surface_mode.as_ref() {
+                    let mode = surface_mode(surface);
+                    unsafe {
+                        gl.uniform_1_i32(Some(location), mode);
+                    }
+                }
                 let surface_transparent = surface
                     .texture_name
                     .as_deref()
@@ -1561,8 +1610,10 @@ impl GlRenderer {
                 if draw.index_count <= 0 {
                     continue;
                 }
-                let base = draw
+                let texture_index = draw
                     .texture_index
+                    .and_then(|index| world.animated_texture_index(index, time));
+                let base = texture_index
                     .and_then(|index| gl_world.textures.get(index))
                     .unwrap_or(&gl_state.fallback_base);
                 let lightmap = draw
@@ -1921,6 +1972,26 @@ fn build_ui_vertices(text: &UiText) -> Vec<f32> {
     }
 
     vertices
+}
+
+#[cfg(feature = "glow")]
+fn surface_mode(surface: &RenderSurface) -> i32 {
+    let Some(name) = surface.texture_name.as_deref() else {
+        return 0;
+    };
+    if is_sky_name(name) {
+        1
+    } else if name.starts_with('*') {
+        2
+    } else {
+        0
+    }
+}
+
+#[cfg(feature = "glow")]
+fn is_sky_name(name: &str) -> bool {
+    name.get(0..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sky"))
 }
 
 #[cfg(test)]

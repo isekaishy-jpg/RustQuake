@@ -117,6 +117,8 @@ pub struct RenderWorld {
     pub surfaces: Vec<RenderSurface>,
     pub textures: Vec<RenderTexture>,
     pub brush_models: Vec<RenderBrushModel>,
+    texture_anim_sets: Vec<Vec<usize>>,
+    texture_anim_lookup: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,13 +241,33 @@ impl RenderWorld {
         let (textures, texture_map) = build_textures(&bsp, palette);
         let (surfaces, face_to_surface) = build_surfaces(&bsp, &texture_map);
         let brush_models = build_brush_models(&bsp, &surfaces, &face_to_surface);
+        let (texture_anim_sets, texture_anim_lookup) = build_texture_anims(&textures);
         Self {
             map_name: map_name.into(),
             bsp,
             surfaces,
             textures,
             brush_models,
+            texture_anim_sets,
+            texture_anim_lookup,
         }
+    }
+
+    pub fn animated_texture_index(&self, texture_index: usize, time: f32) -> Option<usize> {
+        let Some(anim_index) = self
+            .texture_anim_lookup
+            .get(texture_index)
+            .copied()
+            .flatten()
+        else {
+            return Some(texture_index);
+        };
+        let frames = self.texture_anim_sets.get(anim_index)?;
+        if frames.is_empty() {
+            return Some(texture_index);
+        }
+        let frame = ((time * 10.0) as usize) % frames.len();
+        Some(frames[frame])
     }
 }
 
@@ -373,6 +395,66 @@ fn build_brush_models(
         });
     }
     models
+}
+
+fn build_texture_anims(textures: &[RenderTexture]) -> (Vec<Vec<usize>>, Vec<Option<usize>>) {
+    let mut groups: std::collections::HashMap<(char, String), Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+
+    for (index, texture) in textures.iter().enumerate() {
+        let name = texture.name.as_str();
+        let mut chars = name.chars();
+        let Some(prefix) = chars.next() else {
+            continue;
+        };
+        if prefix != '+' && prefix != '~' {
+            continue;
+        }
+        let Some(frame_char) = chars.next() else {
+            continue;
+        };
+        let Some(frame_index) = anim_frame_index(frame_char) else {
+            continue;
+        };
+        let base: String = chars.collect();
+        if base.is_empty() {
+            continue;
+        }
+        groups
+            .entry((prefix, base))
+            .or_default()
+            .push((frame_index, index));
+    }
+
+    let mut anim_sets = Vec::new();
+    let mut lookup = vec![None; textures.len()];
+
+    for frames in groups.into_values() {
+        let mut frames = frames;
+        frames.sort_by_key(|(frame_index, _)| *frame_index);
+        let anim_index = anim_sets.len();
+        let mut sequence = Vec::with_capacity(frames.len());
+        for (_, texture_index) in frames {
+            sequence.push(texture_index);
+        }
+        for &texture_index in &sequence {
+            lookup[texture_index] = Some(anim_index);
+        }
+        anim_sets.push(sequence);
+    }
+
+    (anim_sets, lookup)
+}
+
+fn anim_frame_index(frame: char) -> Option<usize> {
+    if frame.is_ascii_digit() {
+        return frame.to_digit(10).map(|value| value as usize);
+    }
+    let lower = frame.to_ascii_lowercase();
+    if ('a'..='j').contains(&lower) {
+        return Some(10 + (lower as u8 - b'a') as usize);
+    }
+    None
 }
 
 fn bounds_for_surfaces(surfaces: &[RenderSurface], indices: &[usize]) -> RenderBounds {
@@ -1362,5 +1444,49 @@ mod tests {
         let rgba = &world.textures[0].mips[0];
         assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
         assert_eq!(&rgba[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn selects_animated_texture_frame() {
+        let mut palette_bytes = vec![0u8; 256 * 3];
+        palette_bytes[0] = 10;
+        palette_bytes[1] = 20;
+        palette_bytes[2] = 30;
+        let palette = Palette::from_bytes(&palette_bytes).unwrap();
+
+        let mip = qw_common::MipTexture {
+            width: 1,
+            height: 1,
+            mips: [vec![0], vec![0], vec![0], vec![0]],
+        };
+        let bsp = BspRender {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            texinfo: Vec::new(),
+            faces: Vec::new(),
+            textures: vec![
+                qw_common::BspTexture {
+                    name: "+0anim".to_string(),
+                    width: 1,
+                    height: 1,
+                    offsets: [0; 4],
+                    mip_data: Some(mip.clone()),
+                },
+                qw_common::BspTexture {
+                    name: "+1anim".to_string(),
+                    width: 1,
+                    height: 1,
+                    offsets: [0; 4],
+                    mip_data: Some(mip),
+                },
+            ],
+            lighting: Vec::new(),
+            models: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
+        assert_eq!(world.animated_texture_index(0, 0.0), Some(0));
+        assert_eq!(world.animated_texture_index(0, 0.11), Some(1));
     }
 }
