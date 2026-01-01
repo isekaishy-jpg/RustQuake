@@ -2,16 +2,32 @@ use qw_common::{Entity, Vec3};
 use qw_qc::{QcType, Vm, VmError};
 use std::collections::HashMap;
 
-#[derive(Default)]
 pub struct ServerQcContext {
     precache_files: Vec<String>,
     precache_models: Vec<String>,
     precache_sounds: Vec<String>,
     cvars: HashMap<String, String>,
     prints: Vec<String>,
+    lightstyles: Vec<Option<String>>,
     rng_state: u32,
     globals: QcGlobals,
     fields: QcFields,
+}
+
+impl Default for ServerQcContext {
+    fn default() -> Self {
+        Self {
+            precache_files: Vec::new(),
+            precache_models: Vec::new(),
+            precache_sounds: Vec::new(),
+            cvars: HashMap::new(),
+            prints: Vec::new(),
+            lightstyles: vec![None; 64],
+            rng_state: 0,
+            globals: QcGlobals::default(),
+            fields: QcFields::default(),
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -212,6 +228,7 @@ fn register_builtins(vm: &mut Vm) {
             "checkbottom" => builtin_true,
             "walkmove" => builtin_true,
             "pointcontents" => builtin_pointcontents,
+            "lightstyle" => builtin_lightstyle,
             "vlen" => builtin_vlen,
             "normalize" => builtin_normalize,
             "vectoyaw" => builtin_vectoyaw,
@@ -485,6 +502,21 @@ fn builtin_traceline(vm: &mut Vm) -> Result<(), VmError> {
 
 fn builtin_pointcontents(vm: &mut Vm) -> Result<(), VmError> {
     vm.set_return_f32(0.0)
+}
+
+fn builtin_lightstyle(vm: &mut Vm) -> Result<(), VmError> {
+    let style = vm.read_param_f32(0)? as i32;
+    let pattern = read_param_string(vm, 1);
+    if style >= 0 {
+        if let Some(ctx) = vm.context_mut::<ServerQcContext>() {
+            let index = style as usize;
+            if index >= ctx.lightstyles.len() {
+                ctx.lightstyles.resize(index + 1, None);
+            }
+            ctx.lightstyles[index] = Some(pattern);
+        }
+    }
+    Ok(())
 }
 
 fn builtin_vlen(vm: &mut Vm) -> Result<(), VmError> {
