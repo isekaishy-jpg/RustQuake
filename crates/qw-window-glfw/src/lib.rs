@@ -51,52 +51,17 @@ pub enum WindowEvent {
     Key { key: Key, action: Action },
 }
 
-#[derive(Debug)]
-pub struct GlfwWindow {
-    config: WindowConfig,
-    open: bool,
-    pending_events: Vec<WindowEvent>,
-}
+#[cfg(feature = "glfw")]
+mod glfw_backend;
+#[cfg(feature = "glfw")]
+pub use glfw_backend::GlfwWindow;
 
-impl GlfwWindow {
-    pub fn new(config: WindowConfig) -> Self {
-        Self {
-            config,
-            open: true,
-            pending_events: Vec::new(),
-        }
-    }
+#[cfg(not(feature = "glfw"))]
+mod stub;
+#[cfg(not(feature = "glfw"))]
+pub use stub::GlfwWindow;
 
-    pub fn poll_events(&mut self) -> Vec<WindowEvent> {
-        std::mem::take(&mut self.pending_events)
-    }
-
-    pub fn push_event(&mut self, event: WindowEvent) {
-        self.pending_events.push(event);
-    }
-
-    pub fn should_close(&self) -> bool {
-        !self.open
-    }
-
-    pub fn close(&mut self) {
-        self.open = false;
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        (self.config.width, self.config.height)
-    }
-
-    pub fn set_title(&mut self, title: impl Into<String>) {
-        self.config.title = title.into();
-    }
-
-    pub fn config(&self) -> &WindowConfig {
-        &self.config
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, not(feature = "glfw")))]
 mod tests {
     use super::*;
 
