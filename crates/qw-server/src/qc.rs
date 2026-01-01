@@ -208,6 +208,10 @@ fn register_builtins(vm: &mut Vm) {
             "find" => builtin_find,
             "nextent" => builtin_nextent,
             "traceline" => builtin_traceline,
+            "droptofloor" => builtin_true,
+            "checkbottom" => builtin_true,
+            "walkmove" => builtin_true,
+            "pointcontents" => builtin_pointcontents,
             "vlen" => builtin_vlen,
             "normalize" => builtin_normalize,
             "vectoyaw" => builtin_vectoyaw,
@@ -226,6 +230,10 @@ fn register_builtins(vm: &mut Vm) {
 
 fn builtin_noop(vm: &mut Vm) -> Result<(), VmError> {
     vm.set_return_f32(0.0)
+}
+
+fn builtin_true(vm: &mut Vm) -> Result<(), VmError> {
+    vm.set_return_f32(1.0)
 }
 
 fn builtin_dprint(vm: &mut Vm) -> Result<(), VmError> {
@@ -473,6 +481,10 @@ fn builtin_traceline(vm: &mut Vm) -> Result<(), VmError> {
     }
 
     vm.set_return_f32(1.0)
+}
+
+fn builtin_pointcontents(vm: &mut Vm) -> Result<(), VmError> {
+    vm.set_return_f32(0.0)
 }
 
 fn builtin_vlen(vm: &mut Vm) -> Result<(), VmError> {
