@@ -9,9 +9,31 @@ pub struct ServerQcContext {
     cvars: HashMap<String, String>,
     prints: Vec<String>,
     lightstyles: Vec<Option<String>>,
+    ambient_sounds: Vec<AmbientSound>,
+    sounds: Vec<QueuedSound>,
+    static_entities: Vec<usize>,
     rng_state: u32,
     globals: QcGlobals,
     fields: QcFields,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct AmbientSound {
+    origin: Vec3,
+    sample: String,
+    volume: f32,
+    attenuation: f32,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct QueuedSound {
+    entity: usize,
+    channel: f32,
+    sample: String,
+    volume: f32,
+    attenuation: f32,
 }
 
 impl Default for ServerQcContext {
@@ -23,6 +45,9 @@ impl Default for ServerQcContext {
             cvars: HashMap::new(),
             prints: Vec::new(),
             lightstyles: vec![None; 64],
+            ambient_sounds: Vec::new(),
+            sounds: Vec::new(),
+            static_entities: Vec::new(),
             rng_state: 0,
             globals: QcGlobals::default(),
             fields: QcFields::default(),
@@ -229,6 +254,9 @@ fn register_builtins(vm: &mut Vm) {
             "walkmove" => builtin_true,
             "pointcontents" => builtin_pointcontents,
             "lightstyle" => builtin_lightstyle,
+            "ambientsound" => builtin_ambientsound,
+            "sound" => builtin_sound,
+            "makestatic" => builtin_makestatic,
             "vlen" => builtin_vlen,
             "normalize" => builtin_normalize,
             "vectoyaw" => builtin_vectoyaw,
@@ -515,6 +543,48 @@ fn builtin_lightstyle(vm: &mut Vm) -> Result<(), VmError> {
             }
             ctx.lightstyles[index] = Some(pattern);
         }
+    }
+    Ok(())
+}
+
+fn builtin_ambientsound(vm: &mut Vm) -> Result<(), VmError> {
+    let origin = vm.read_param_vec(0)?;
+    let sample = read_param_string(vm, 1);
+    let volume = vm.read_param_f32(2)?;
+    let attenuation = vm.read_param_f32(3)?;
+    if let Some(ctx) = vm.context_mut::<ServerQcContext>() {
+        ctx.ambient_sounds.push(AmbientSound {
+            origin,
+            sample,
+            volume,
+            attenuation,
+        });
+    }
+    Ok(())
+}
+
+fn builtin_sound(vm: &mut Vm) -> Result<(), VmError> {
+    let entity = read_param_entity(vm, 0)?;
+    let channel = vm.read_param_f32(1)?;
+    let sample = read_param_string(vm, 2);
+    let volume = vm.read_param_f32(3)?;
+    let attenuation = vm.read_param_f32(4)?;
+    if let Some(ctx) = vm.context_mut::<ServerQcContext>() {
+        ctx.sounds.push(QueuedSound {
+            entity,
+            channel,
+            sample,
+            volume,
+            attenuation,
+        });
+    }
+    Ok(())
+}
+
+fn builtin_makestatic(vm: &mut Vm) -> Result<(), VmError> {
+    let entity = read_param_entity(vm, 0)?;
+    if let Some(ctx) = vm.context_mut::<ServerQcContext>() {
+        ctx.static_entities.push(entity);
     }
     Ok(())
 }
