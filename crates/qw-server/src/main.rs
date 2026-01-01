@@ -1,10 +1,10 @@
 use qw_common::{
     A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityDelta,
     EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError,
-    OobMessage, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs,
-    S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf, StringListChunk, SvcMessage, UserCmd, Vec3,
-    build_out_of_band, find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload,
-    parse_entities, parse_oob_message, write_svc_message,
+    OobMessage, PF_COMMAND, PF_MSEC, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate,
+    PlayerInfoMessage, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf,
+    StringListChunk, SvcMessage, UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir,
+    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -29,10 +29,10 @@ struct ServerInfo {
 
 #[derive(Clone)]
 struct ServerWorld {
+    spawn_point: SpawnPoint,
     static_entities: Vec<EntityState>,
     static_sounds: Vec<StaticSoundInfo>,
     player_baseline: EntityState,
-    player_info: PlayerInfoMessage,
 }
 
 #[derive(Clone)]
@@ -49,6 +49,9 @@ struct ClientState {
     last_heard: Instant,
     userinfo: String,
     last_frame: Instant,
+    player_origin: Vec3,
+    player_angles: Vec3,
+    last_cmd: UserCmd,
 }
 
 impl ClientState {
@@ -59,6 +62,9 @@ impl ClientState {
             last_heard: Instant::now(),
             userinfo,
             last_frame: Instant::now(),
+            player_origin: Vec3::default(),
+            player_angles: Vec3::default(),
+            last_cmd: UserCmd::default(),
         }
     }
 }
@@ -277,10 +283,10 @@ fn build_world_snapshot(
     }
 
     ServerWorld {
+        spawn_point: spawn,
         static_entities,
         static_sounds,
         player_baseline: build_player_baseline(spawn, server_info),
-        player_info: build_player_info(spawn),
     }
 }
 
@@ -311,22 +317,6 @@ fn build_player_baseline(spawn: SpawnPoint, server_info: &ServerInfo) -> EntityS
         colormap: 0,
         skinnum: 0,
         effects: 0,
-    }
-}
-
-fn build_player_info(spawn: SpawnPoint) -> PlayerInfoMessage {
-    PlayerInfoMessage {
-        num: 0,
-        flags: 0,
-        origin: spawn.origin,
-        frame: 0,
-        msec: None,
-        command: None,
-        velocity: [0; 3],
-        model_index: None,
-        skin_num: None,
-        effects: None,
-        weapon_frame: None,
     }
 }
 
@@ -498,7 +488,10 @@ fn handle_inband(
                 handle_string_cmd(socket, addr, client, &context.info, &context.world, &text)?;
             }
             Clc::Move => {
-                pending = skip_move(&mut reader).map_err(msg_to_io)?;
+                let parsed = parse_move(&mut reader).map_err(msg_to_io)?;
+                client.last_cmd = parsed.cmd;
+                client.player_angles = parsed.cmd.angles;
+                pending = parsed.next;
                 saw_move = true;
             }
             Clc::Delta => {
@@ -561,7 +554,7 @@ fn handle_string_cmd(
             send_prespawn(socket, addr, client, server_world)?;
         }
         "spawn" => {
-            send_spawn(socket, addr, client, server_info)?;
+            send_spawn(socket, addr, client, server_info, server_world)?;
         }
         "begin" => {
             send_begin(client);
@@ -657,7 +650,15 @@ fn send_spawn(
     addr: SocketAddr,
     client: &mut ClientState,
     server_info: &ServerInfo,
+    server_world: &ServerWorld,
 ) -> Result<(), std::io::Error> {
+    client.player_origin = server_world.spawn_point.origin;
+    client.player_angles = server_world.spawn_point.angles;
+    client.last_cmd = UserCmd {
+        angles: server_world.spawn_point.angles,
+        ..UserCmd::default()
+    };
+
     let mut messages = Vec::new();
     messages.push(SvcMessage::SignonNum(3));
     messages.extend(server_info_messages(server_info));
@@ -838,19 +839,51 @@ fn maybe_send_frame(
     }
 
     let server_time = context.start.elapsed().as_secs_f32();
-    let delta = entity_delta_from(&context.world.player_baseline);
+    let player_state = player_state_for_client(&context.world, client);
+    let delta = entity_delta_from(&player_state);
     let update = PacketEntitiesUpdate {
         delta_from: None,
         entities: vec![delta],
     };
+    let info = build_player_info(0, client);
     let messages = [
         SvcMessage::Time(server_time),
-        SvcMessage::PlayerInfo(context.world.player_info.clone()),
+        SvcMessage::SetAngle(client.player_angles),
+        SvcMessage::PlayerInfo(info),
         SvcMessage::PacketEntities(update),
     ];
     send_unreliable_messages(socket, addr, client, &messages)?;
     client.last_frame = Instant::now();
     Ok(())
+}
+
+fn player_state_for_client(server_world: &ServerWorld, client: &ClientState) -> EntityState {
+    let mut state = server_world.player_baseline;
+    state.origin = client.player_origin;
+    state.angles = client.player_angles;
+    state
+}
+
+fn build_player_info(num: u8, client: &ClientState) -> PlayerInfoMessage {
+    let cmd = client.last_cmd;
+    let mut flags = PF_COMMAND as u16;
+    let msec = Some(cmd.msec);
+    if msec.is_some() {
+        flags |= PF_MSEC as u16;
+    }
+    PlayerInfoMessage {
+        num,
+        flags,
+        origin: client.player_origin,
+        frame: 0,
+        msec,
+        command: Some(cmd),
+        velocity: [0; 3],
+        model_index: None,
+        skin_num: None,
+        effects: None,
+        weapon_frame: None,
+    }
 }
 
 fn entity_delta_from(state: &EntityState) -> EntityDelta {
@@ -888,25 +921,31 @@ fn clamp_entity_u8(value: i32) -> Option<u8> {
     Some(value as u8)
 }
 
-fn skip_move(reader: &mut MsgReader) -> Result<Option<u8>, MsgReadError> {
+struct MoveParseResult {
+    cmd: UserCmd,
+    next: Option<u8>,
+}
+
+fn parse_move(reader: &mut MsgReader) -> Result<MoveParseResult, MsgReadError> {
     let _checksum = reader.read_u8()?;
     let _lost = reader.read_u8()?;
     let base = UserCmd::default();
     let cmd0 = reader.read_delta_usercmd(&base)?;
     let cmd1 = reader.read_delta_usercmd(&cmd0)?;
-    let _cmd2 = reader.read_delta_usercmd(&cmd1)?;
+    let cmd2 = reader.read_delta_usercmd(&cmd1)?;
 
-    if reader.remaining() > 0 {
+    let next = if reader.remaining() > 0 {
         let next = reader.read_u8()?;
         if next == Clc::Delta as u8 {
             let _ = reader.read_u8()?;
-            Ok(None)
+            None
         } else {
-            Ok(Some(next))
+            Some(next)
         }
     } else {
-        Ok(None)
-    }
+        None
+    };
+    Ok(MoveParseResult { cmd: cmd2, next })
 }
 
 fn netchan_to_io(err: NetchanError) -> std::io::Error {
@@ -980,5 +1019,84 @@ fn describe_vm_error(vm: &Vm, err: &VmError) -> String {
             )
         }
         other => format!("{other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_spawn_point_from_entities() {
+        let text = r#"
+{
+"classname" "info_player_deathmatch"
+"origin" "10 20 30"
+"angles" "0 180 0"
+}
+{
+"classname" "info_player_start"
+"origin" "1 2 3"
+"angle" "90"
+}
+"#;
+        let entities = parse_entities(text).unwrap();
+        let spawn = find_spawn_point(&entities);
+        assert_eq!(spawn.origin, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(spawn.angles, Vec3::new(0.0, 90.0, 0.0));
+    }
+
+    #[test]
+    fn parses_move_last_command_and_next() {
+        let base = UserCmd::default();
+        let cmd0 = UserCmd {
+            msec: 1,
+            angles: Vec3::new(10.0, 20.0, 30.0),
+            forwardmove: 100,
+            sidemove: -50,
+            upmove: 0,
+            buttons: 1,
+            impulse: 0,
+        };
+        let cmd1 = UserCmd {
+            msec: 2,
+            angles: Vec3::new(15.0, 25.0, 35.0),
+            forwardmove: 110,
+            sidemove: -40,
+            upmove: 5,
+            buttons: 3,
+            impulse: 1,
+        };
+        let cmd2 = UserCmd {
+            msec: 3,
+            angles: Vec3::new(20.0, 30.0, 40.0),
+            forwardmove: 120,
+            sidemove: -30,
+            upmove: 10,
+            buttons: 2,
+            impulse: 0,
+        };
+
+        let mut buf = SizeBuf::new(128);
+        buf.write_u8(0).unwrap();
+        buf.write_u8(0).unwrap();
+        buf.write_delta_usercmd(&base, &cmd0).unwrap();
+        buf.write_delta_usercmd(&cmd0, &cmd1).unwrap();
+        buf.write_delta_usercmd(&cmd1, &cmd2).unwrap();
+        buf.write_u8(Clc::StringCmd as u8).unwrap();
+
+        let mut reader = MsgReader::new(buf.as_slice());
+        let parsed = parse_move(&mut reader).unwrap();
+        assert_eq!(parsed.cmd.msec, cmd2.msec);
+        assert_eq!(parsed.cmd.forwardmove, cmd2.forwardmove);
+        assert_eq!(parsed.cmd.sidemove, cmd2.sidemove);
+        assert_eq!(parsed.cmd.upmove, cmd2.upmove);
+        assert_eq!(parsed.cmd.buttons, cmd2.buttons);
+        assert_eq!(parsed.cmd.impulse, cmd2.impulse);
+        let angle_eps = 0.01;
+        assert!((parsed.cmd.angles.x - cmd2.angles.x).abs() < angle_eps);
+        assert!((parsed.cmd.angles.y - cmd2.angles.y).abs() < angle_eps);
+        assert!((parsed.cmd.angles.z - cmd2.angles.z).abs() < angle_eps);
+        assert_eq!(parsed.next, Some(Clc::StringCmd as u8));
     }
 }
