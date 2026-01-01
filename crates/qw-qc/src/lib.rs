@@ -597,18 +597,47 @@ impl Vm {
                     };
                     self.write_f32(statement.c, if result { 1.0 } else { 0.0 })?;
                 }
-                OP_EQ_S | OP_NE_S | OP_EQ_E | OP_NE_E | OP_EQ_FNC | OP_NE_FNC => {
-                    let a = self.read_raw(statement.a)?;
-                    let b = self.read_raw(statement.b)?;
-                    let result = a == b;
-                    let result = match statement.op {
-                        OP_NE_S | OP_NE_E | OP_NE_FNC => !result,
-                        _ => result,
+                OP_EQ_S | OP_NE_S => {
+                    let a = self.read_raw(statement.a)? as i32;
+                    let b = self.read_raw(statement.b)? as i32;
+                    let a_value = self.progs.string_at(a).unwrap_or_default();
+                    let b_value = self.progs.string_at(b).unwrap_or_default();
+                    let result = a_value == b_value;
+                    let result = if statement.op == OP_NE_S {
+                        !result
+                    } else {
+                        result
                     };
                     self.write_f32(statement.c, if result { 1.0 } else { 0.0 })?;
                 }
-                OP_NOT_F | OP_NOT_S | OP_NOT_ENT | OP_NOT_FNC => {
+                OP_EQ_E | OP_NE_E | OP_EQ_FNC | OP_NE_FNC => {
+                    let a = self.read_raw(statement.a)?;
+                    let b = self.read_raw(statement.b)?;
+                    let result = a == b;
+                    let result = if statement.op == OP_NE_E || statement.op == OP_NE_FNC {
+                        !result
+                    } else {
+                        result
+                    };
+                    self.write_f32(statement.c, if result { 1.0 } else { 0.0 })?;
+                }
+                OP_NOT_F | OP_NOT_FNC => {
                     let value = self.read_raw(statement.a)?;
+                    let result = value == 0;
+                    self.write_f32(statement.c, if result { 1.0 } else { 0.0 })?;
+                }
+                OP_NOT_S => {
+                    let offset = self.read_raw(statement.a)? as i32;
+                    let empty = offset == 0
+                        || self
+                            .progs
+                            .string_at(offset)
+                            .map(|value| value.is_empty())
+                            .unwrap_or(true);
+                    self.write_f32(statement.c, if empty { 1.0 } else { 0.0 })?;
+                }
+                OP_NOT_ENT => {
+                    let value = self.read_raw(statement.a)? as i32;
                     let result = value == 0;
                     self.write_f32(statement.c, if result { 1.0 } else { 0.0 })?;
                 }
