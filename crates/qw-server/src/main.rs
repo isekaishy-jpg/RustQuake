@@ -1,11 +1,12 @@
 use qw_common::{
-    A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityDelta,
-    EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError,
-    OobMessage, PF_COMMAND, PF_MSEC, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3, PORT_SERVER,
-    PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs, S2C_CHALLENGE,
-    S2C_CONNECTION, ServerData, SizeBuf, StringListChunk, SvcMessage, UPDATE_MASK, UserCmd, Vec3,
-    build_out_of_band, find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload,
-    parse_entities, parse_oob_message, write_svc_message,
+    A2A_ACK, A2A_ECHO, Bsp, BspCollision, BspError, Clc, ClientDataMessage, DataPathError, Entity,
+    EntityDelta, EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan,
+    NetchanError, OobMessage, PF_COMMAND, PF_MSEC, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3,
+    PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs, S2C_CHALLENGE,
+    S2C_CONNECTION, SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT, ServerData, SizeBuf,
+    StringListChunk, SvcMessage, UPDATE_MASK, UserCmd, Vec3, build_out_of_band, find_game_dir,
+    find_id1_dir, locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message,
+    trace_hull, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ struct ServerInfo {
 #[derive(Clone)]
 struct ServerWorld {
     spawn_point: SpawnPoint,
+    collision: Option<BspCollision>,
     static_entities: Vec<EntityState>,
     static_sounds: Vec<StaticSoundInfo>,
     player_baseline: EntityState,
@@ -57,6 +59,8 @@ struct ClientState {
     ground_z: f32,
     last_sent_state: EntityState,
     last_packet_sequence: Option<u32>,
+    player_hull: usize,
+    on_ground: bool,
 }
 
 impl ClientState {
@@ -74,6 +78,8 @@ impl ClientState {
             ground_z: 0.0,
             last_sent_state: EntityState::default(),
             last_packet_sequence: None,
+            player_hull: 1,
+            on_ground: false,
         }
     }
 }
@@ -82,6 +88,12 @@ struct ServerContext {
     info: ServerInfo,
     world: ServerWorld,
     start: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct MapData {
+    entities: Vec<Entity>,
+    collision: BspCollision,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -131,8 +143,9 @@ fn run() -> Result<(), ServerError> {
         );
     }
 
-    let map_entities = load_map_entities(&fs, &map_name).ok();
-    if let Some(entities) = map_entities.as_ref() {
+    let map_data = load_map_data(&fs, &map_name).ok();
+    if let Some(data) = map_data.as_ref() {
+        let entities = &data.entities;
         if let Err(err) = qc::apply_worldspawn(&mut vm, entities) {
             println!("[server] qc worldspawn not applied: {err:?}");
         }
@@ -158,11 +171,13 @@ fn run() -> Result<(), ServerError> {
 
     let qc_snapshot = qc::snapshot(&vm);
     let server_info = build_server_info(&game_name, &map_name, qc_snapshot.clone());
-    let spawn_point = map_entities
+    let spawn_point = map_data
         .as_ref()
-        .map(|entities| find_spawn_point(entities))
+        .map(|data| find_spawn_point(&data.entities))
         .unwrap_or_default();
-    let server_world = build_world_snapshot(&vm, &server_info, &qc_snapshot, spawn_point);
+    let collision = map_data.as_ref().map(|data| data.collision.clone());
+    let server_world =
+        build_world_snapshot(&vm, &server_info, &qc_snapshot, spawn_point, collision);
     run_network(server_info, server_world)?;
 
     Ok(())
@@ -197,12 +212,17 @@ impl std::fmt::Display for ServerError {
     }
 }
 
-fn load_map_entities(fs: &QuakeFs, map_name: &str) -> Result<Vec<Entity>, ServerError> {
+fn load_map_data(fs: &QuakeFs, map_name: &str) -> Result<MapData, ServerError> {
     let map_path = format!("maps/{map_name}.bsp");
     let bytes = fs.read(&map_path).map_err(ServerError::Fs)?;
     let bsp = Bsp::from_bytes(bytes).map_err(ServerError::Bsp)?;
     let text = bsp.entities_text().map_err(ServerError::Bsp)?;
-    parse_entities(&text).map_err(ServerError::Entities)
+    let entities = parse_entities(&text).map_err(ServerError::Entities)?;
+    let collision = BspCollision::from_bsp(&bsp).map_err(ServerError::Bsp)?;
+    Ok(MapData {
+        entities,
+        collision,
+    })
 }
 
 fn build_server_info(
@@ -264,6 +284,7 @@ fn build_world_snapshot(
     server_info: &ServerInfo,
     snapshot: &qc::ServerQcSnapshot,
     spawn: SpawnPoint,
+    collision: Option<BspCollision>,
 ) -> ServerWorld {
     let mut static_entities = Vec::new();
     for ent in &snapshot.static_entities {
@@ -293,6 +314,7 @@ fn build_world_snapshot(
 
     ServerWorld {
         spawn_point: spawn,
+        collision,
         static_entities,
         static_sounds,
         player_baseline: build_player_baseline(spawn, server_info),
@@ -498,7 +520,12 @@ fn handle_inband(
             }
             Clc::Move => {
                 let parsed = parse_move(&mut reader).map_err(msg_to_io)?;
-                apply_move(&context.info.movevars, client, parsed.cmd);
+                apply_move(
+                    &context.info.movevars,
+                    context.world.collision.as_ref(),
+                    client,
+                    parsed.cmd,
+                );
                 client.last_cmd = parsed.cmd;
                 client.player_angles = parsed.cmd.angles;
                 pending = parsed.next;
@@ -672,6 +699,8 @@ fn send_spawn(
     client.ground_z = server_world.spawn_point.origin.z;
     client.last_sent_state = server_world.player_baseline;
     client.last_packet_sequence = None;
+    client.player_hull = 1;
+    client.on_ground = true;
 
     let mut messages = Vec::new();
     messages.push(SvcMessage::SignonNum(3));
@@ -839,6 +868,18 @@ fn default_client_data() -> ClientDataMessage {
     }
 }
 
+fn build_client_data(client: &ClientState) -> ClientDataMessage {
+    let mut data = default_client_data();
+    data.bits = SU_VIEWHEIGHT | SU_VELOCITY1 | SU_VELOCITY2 | SU_VELOCITY3;
+    data.velocity = client.player_velocity;
+    data.onground = client.on_ground;
+    data
+}
+
+fn delta_from_sequence(seq: u32) -> u8 {
+    (seq & UPDATE_MASK as u32) as u8
+}
+
 fn maybe_send_frame(
     socket: &UdpSocket,
     addr: SocketAddr,
@@ -855,18 +896,18 @@ fn maybe_send_frame(
     let server_time = context.start.elapsed().as_secs_f32();
     let player_state = player_state_for_client(&context.world, client);
     let delta = entity_delta_between(&client.last_sent_state, &player_state);
-    let delta_from = client
-        .last_packet_sequence
-        .map(|seq| (seq & UPDATE_MASK as u32) as u8);
+    let delta_from = client.last_packet_sequence.map(delta_from_sequence);
     let outgoing_seq = client.netchan.outgoing_sequence();
     let update = PacketEntitiesUpdate {
         delta_from,
         entities: delta.into_iter().collect(),
     };
+    let client_data = build_client_data(client);
     let info = build_player_info(0, client);
     let messages = [
         SvcMessage::Time(server_time),
         SvcMessage::SetAngle(client.player_angles),
+        SvcMessage::ClientData(client_data),
         SvcMessage::PlayerInfo(info),
         SvcMessage::PacketEntities(update),
     ];
@@ -975,7 +1016,12 @@ fn clamp_i16(value: f32) -> i16 {
     value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }
 
-fn apply_move(movevars: &MoveVars, client: &mut ClientState, cmd: UserCmd) {
+fn apply_move(
+    movevars: &MoveVars,
+    collision: Option<&BspCollision>,
+    client: &mut ClientState,
+    cmd: UserCmd,
+) {
     if cmd.msec == 0 {
         client.player_velocity = Vec3::default();
         return;
@@ -1000,18 +1046,31 @@ fn apply_move(movevars: &MoveVars, client: &mut ClientState, cmd: UserCmd) {
     velocity = apply_accel(velocity, wish, movevars.maxspeed, movevars.accelerate, dt);
     velocity.z -= movevars.gravity * movevars.entgravity * dt;
 
-    client.player_velocity = velocity;
-    client.player_origin = Vec3::new(
+    let start = client.player_origin;
+    let end = Vec3::new(
         client.player_origin.x + velocity.x * dt,
         client.player_origin.y + velocity.y * dt,
         client.player_origin.z + velocity.z * dt,
     );
-    if client.player_origin.z < client.ground_z {
+
+    let trace = collision
+        .and_then(|world| world.hull(0, client.player_hull))
+        .map(|hull| trace_hull(&hull, start, end));
+    let endpos = trace.map(|hit| hit.endpos).unwrap_or(end);
+    let mut on_ground = trace
+        .map(|hit| hit.fraction < 1.0 && hit.plane.normal.z > 0.7)
+        .unwrap_or(false);
+
+    client.player_velocity = velocity;
+    client.player_origin = endpos;
+    if client.player_origin.z <= client.ground_z {
         client.player_origin.z = client.ground_z;
-        if client.player_velocity.z < 0.0 {
-            client.player_velocity.z = 0.0;
-        }
+        on_ground = true;
     }
+    if on_ground && client.player_velocity.z < 0.0 {
+        client.player_velocity.z = 0.0;
+    }
+    client.on_ground = on_ground;
 }
 
 fn vec_length(vec: Vec3) -> f32 {
@@ -1177,6 +1236,10 @@ fn describe_vm_error(vm: &Vm, err: &VmError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qw_common::{
+        BSP_VERSION, CONTENTS_EMPTY, CONTENTS_SOLID, HEADER_LUMPS, HULL1_MAXS, HULL1_MINS,
+        LUMP_CLIPNODES, LUMP_LEAFS, LUMP_MODELS, LUMP_NODES, LUMP_PLANES, MAX_MAP_HULLS,
+    };
 
     fn assert_close(actual: f32, expected: f32) {
         let eps = 0.01;
@@ -1299,8 +1362,137 @@ mod tests {
             buttons: 0,
             impulse: 0,
         };
-        apply_move(&movevars, &mut client, cmd);
+        apply_move(&movevars, None, &mut client, cmd);
         assert_close(client.player_velocity.x, 100.0);
         assert_close(client.player_origin.x, 10.0);
+    }
+
+    #[test]
+    fn trace_hull_blocks_against_world_plane() {
+        let collision = build_test_collision();
+        let hull = collision.hull(0, 1).unwrap();
+        let trace = trace_hull(&hull, Vec3::new(128.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0));
+        assert!(trace.fraction < 1.0);
+    }
+
+    #[test]
+    fn delta_from_sequence_wraps_update_mask() {
+        assert_eq!(delta_from_sequence(0), 0);
+        let wrap = UPDATE_MASK as u32 + 1;
+        assert_eq!(delta_from_sequence(wrap), 0);
+        assert_eq!(delta_from_sequence(wrap + 1), 1);
+    }
+
+    fn build_test_collision() -> BspCollision {
+        let mut lumps = vec![Vec::new(); HEADER_LUMPS];
+
+        let mut planes = Vec::new();
+        push_f32(&mut planes, 1.0);
+        push_f32(&mut planes, 0.0);
+        push_f32(&mut planes, 0.0);
+        push_f32(&mut planes, 64.0);
+        push_i32(&mut planes, 0);
+        lumps[LUMP_PLANES] = planes;
+
+        let mut clipnodes = Vec::new();
+        push_i32(&mut clipnodes, 0);
+        push_i16(&mut clipnodes, CONTENTS_SOLID as i16);
+        push_i16(&mut clipnodes, CONTENTS_EMPTY as i16);
+        lumps[LUMP_CLIPNODES] = clipnodes;
+
+        let mut nodes = Vec::new();
+        push_i32(&mut nodes, 0);
+        push_i16(&mut nodes, -1);
+        push_i16(&mut nodes, -2);
+        for _ in 0..6 {
+            push_i16(&mut nodes, 0);
+        }
+        push_u16(&mut nodes, 0);
+        push_u16(&mut nodes, 0);
+        lumps[LUMP_NODES] = nodes;
+
+        let mut leafs = Vec::new();
+        push_i32(&mut leafs, CONTENTS_SOLID);
+        push_i32(&mut leafs, 0);
+        for _ in 0..6 {
+            push_i16(&mut leafs, 0);
+        }
+        push_u16(&mut leafs, 0);
+        push_u16(&mut leafs, 0);
+        for _ in 0..4 {
+            push_u8(&mut leafs, 0);
+        }
+
+        push_i32(&mut leafs, CONTENTS_EMPTY);
+        push_i32(&mut leafs, 0);
+        for _ in 0..6 {
+            push_i16(&mut leafs, 0);
+        }
+        push_u16(&mut leafs, 0);
+        push_u16(&mut leafs, 0);
+        for _ in 0..4 {
+            push_u8(&mut leafs, 0);
+        }
+        lumps[LUMP_LEAFS] = leafs;
+
+        let mut models = Vec::new();
+        for _ in 0..9 {
+            push_f32(&mut models, 0.0);
+        }
+        for _ in 0..MAX_MAP_HULLS {
+            push_i32(&mut models, 0);
+        }
+        push_i32(&mut models, 0);
+        push_i32(&mut models, 0);
+        push_i32(&mut models, 0);
+        lumps[LUMP_MODELS] = models;
+
+        let data = build_bsp(lumps);
+        let bsp = Bsp::from_bytes(data).unwrap();
+        let collision = BspCollision::from_bsp(&bsp).unwrap();
+        let hull1 = collision.hull(0, 1).unwrap();
+        assert_eq!(hull1.clip_mins, HULL1_MINS);
+        assert_eq!(hull1.clip_maxs, HULL1_MAXS);
+        collision
+    }
+
+    fn build_bsp(lumps: Vec<Vec<u8>>) -> Vec<u8> {
+        let header_size = 4 + HEADER_LUMPS * 8;
+        let mut data = Vec::new();
+        data.extend_from_slice(&BSP_VERSION.to_le_bytes());
+
+        let mut offset = header_size as u32;
+        for i in 0..HEADER_LUMPS {
+            let length = lumps[i].len() as u32;
+            data.extend_from_slice(&offset.to_le_bytes());
+            data.extend_from_slice(&length.to_le_bytes());
+            offset += length;
+        }
+
+        for payload in lumps {
+            data.extend_from_slice(&payload);
+        }
+
+        data
+    }
+
+    fn push_f32(buf: &mut Vec<u8>, value: f32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i32(buf: &mut Vec<u8>, value: i32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_i16(buf: &mut Vec<u8>, value: i16) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u16(buf: &mut Vec<u8>, value: u16) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u8(buf: &mut Vec<u8>, value: u8) {
+        buf.push(value);
     }
 }
