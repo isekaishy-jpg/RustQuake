@@ -29,8 +29,9 @@ use qw_common::{
     InfoError, InfoString, STAT_AMMO, STAT_ARMOR, STAT_HEALTH, UPDATE_MASK, value_for_key,
 };
 use qw_renderer::{
-    RenderEntity, RenderEntityKind, RenderModel, RenderModelKind, RenderModelTexture, RenderView,
-    RenderWorld, Renderer, RendererConfig, UiLayer, UiText,
+    RenderBeam, RenderDynamicLight, RenderEntity, RenderEntityKind, RenderModel, RenderModelKind,
+    RenderModelTexture, RenderParticle, RenderView, RenderWorld, Renderer, RendererConfig, UiLayer,
+    UiText,
 };
 #[cfg(feature = "glow")]
 use qw_renderer_gl::GlDevice;
@@ -246,6 +247,16 @@ fn run() -> Result<(), AppError> {
             let incoming = runner.client.netchan.incoming_sequence();
             let render_time = runner.time_seconds() - runner.state.latency;
             renderer.set_entities(build_render_entities(&runner.state, incoming, render_time));
+            let entity_origins = build_entity_origin_map(&runner.state, incoming, render_time);
+            renderer.set_particles(build_render_particles(&runner.state));
+            renderer.set_beams(build_render_beams(&runner.state));
+            renderer.set_dynamic_lights(build_dynamic_lights(&runner.state, &entity_origins));
+            let fog = runner
+                .state
+                .client_data
+                .as_ref()
+                .and_then(|data| data.inwater.then_some([0.08, 0.12, 0.2, 0.04]));
+            renderer.set_fog(fog);
             renderer.set_ui(build_ui_layer(&runner.state, input_state.showscores()));
             renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
@@ -464,6 +475,228 @@ fn build_render_entities(
     entities
 }
 
+fn build_entity_origin_map(
+    state: &ClientState,
+    incoming_sequence: u32,
+    render_time: f64,
+) -> std::collections::HashMap<u16, qw_common::Vec3> {
+    let frame_index = (incoming_sequence as usize) & UPDATE_MASK;
+    let prev_index = (incoming_sequence.wrapping_sub(1) as usize) & UPDATE_MASK;
+    let frame = &state.frames[frame_index];
+    let prev_frame = &state.frames[prev_index];
+    let frac = interpolation_fraction(render_time, prev_frame.receivedtime, frame.receivedtime);
+    let mut origins = std::collections::HashMap::new();
+
+    let mut prev_lookup = std::collections::HashMap::new();
+    let prev_count = prev_frame.packet_entities.num_entities;
+    for ent in prev_frame.packet_entities.entities.iter().take(prev_count) {
+        prev_lookup.insert(ent.number, *ent);
+    }
+
+    let entity_count = frame.packet_entities.num_entities;
+    for ent in frame.packet_entities.entities.iter().take(entity_count) {
+        let prev = prev_lookup.get(&ent.number);
+        let origin = match prev {
+            Some(previous) => lerp_vec3(previous.origin, ent.origin, frac),
+            None => ent.origin,
+        };
+        if ent.number >= 0 && ent.number <= u16::MAX as i32 {
+            origins.insert(ent.number as u16, origin);
+        }
+    }
+
+    for ent in &state.static_entities {
+        if ent.number >= 0 && ent.number <= u16::MAX as i32 {
+            origins.entry(ent.number as u16).or_insert(ent.origin);
+        }
+    }
+
+    origins
+}
+
+fn build_render_particles(state: &ClientState) -> Vec<RenderParticle> {
+    const MAX_PARTICLES_PER_EVENT: usize = 128;
+    let mut particles = Vec::new();
+    let palette = state.palette.as_ref();
+
+    for effect in &state.particle_effects {
+        let count = (effect.count as usize).min(MAX_PARTICLES_PER_EVENT);
+        let color = rgba_from_palette(palette, effect.color, 200);
+        let offsets = spread_offsets(count, 6.0);
+        for (idx, offset) in offsets.into_iter().enumerate() {
+            let drift = effect.direction.scale(idx as f32 * 0.3);
+            let position = qw_common::Vec3::new(
+                effect.origin.x + drift.x + offset.x,
+                effect.origin.y + drift.y + offset.y,
+                effect.origin.z + drift.z + offset.z,
+            );
+            particles.push(RenderParticle {
+                position,
+                color,
+                size: 4.0,
+            });
+        }
+    }
+
+    for temp in &state.temp_entities {
+        let Some(origin) = temp.origin else {
+            continue;
+        };
+        let (count, color, size, spread) = match temp.kind {
+            qw_common::protocol::TE_GUNSHOT => (12, rgba_from_rgb([255, 220, 160], 200), 4.0, 6.0),
+            qw_common::protocol::TE_BLOOD => (18, rgba_from_rgb([200, 40, 40], 220), 4.0, 6.0),
+            qw_common::protocol::TE_SPIKE
+            | qw_common::protocol::TE_SUPERSPIKE
+            | qw_common::protocol::TE_WIZSPIKE
+            | qw_common::protocol::TE_KNIGHTSPIKE => {
+                (10, rgba_from_rgb([255, 255, 255], 200), 3.0, 5.0)
+            }
+            qw_common::protocol::TE_EXPLOSION => {
+                (32, rgba_from_rgb([255, 160, 60], 220), 6.0, 10.0)
+            }
+            qw_common::protocol::TE_TAREXPLOSION => {
+                (24, rgba_from_rgb([140, 90, 255], 220), 6.0, 9.0)
+            }
+            qw_common::protocol::TE_LAVASPLASH => (28, rgba_from_rgb([255, 80, 20], 220), 5.0, 9.0),
+            qw_common::protocol::TE_TELEPORT => (24, rgba_from_rgb([120, 80, 255], 220), 5.0, 8.0),
+            qw_common::protocol::TE_LIGHTNINGBLOOD => {
+                (16, rgba_from_rgb([255, 40, 40], 220), 5.0, 7.0)
+            }
+            _ => continue,
+        };
+        let offsets = spread_offsets(count, spread);
+        for offset in offsets {
+            let position = qw_common::Vec3::new(
+                origin.x + offset.x,
+                origin.y + offset.y,
+                origin.z + offset.z,
+            );
+            particles.push(RenderParticle {
+                position,
+                color,
+                size,
+            });
+        }
+    }
+
+    for nail in &state.nails {
+        particles.push(RenderParticle {
+            position: nail.origin,
+            color: rgba_from_rgb([255, 220, 180], 220),
+            size: 3.0,
+        });
+    }
+
+    particles
+}
+
+fn build_render_beams(state: &ClientState) -> Vec<RenderBeam> {
+    let mut beams = Vec::new();
+    for temp in &state.temp_entities {
+        if !matches!(
+            temp.kind,
+            qw_common::protocol::TE_LIGHTNING1
+                | qw_common::protocol::TE_LIGHTNING2
+                | qw_common::protocol::TE_LIGHTNING3
+        ) {
+            continue;
+        }
+        let (Some(start), Some(end)) = (temp.start, temp.end) else {
+            continue;
+        };
+        let color = match temp.kind {
+            qw_common::protocol::TE_LIGHTNING1 => rgba_from_rgb([120, 160, 255], 220),
+            qw_common::protocol::TE_LIGHTNING2 => rgba_from_rgb([160, 120, 255], 220),
+            _ => rgba_from_rgb([120, 200, 255], 220),
+        };
+        beams.push(RenderBeam {
+            start,
+            end,
+            color,
+            width: 2.0,
+        });
+    }
+    beams
+}
+
+fn build_dynamic_lights(
+    state: &ClientState,
+    entity_origins: &std::collections::HashMap<u16, qw_common::Vec3>,
+) -> Vec<RenderDynamicLight> {
+    let mut lights = Vec::new();
+
+    for &entity in &state.muzzle_flashes {
+        if let Some(origin) = entity_origins.get(&entity) {
+            lights.push(RenderDynamicLight {
+                origin: *origin,
+                radius: 220.0,
+                color: [1.0, 0.8, 0.6],
+            });
+        }
+    }
+
+    for damage in &state.damage_events {
+        lights.push(RenderDynamicLight {
+            origin: damage.origin,
+            radius: 180.0,
+            color: [1.0, 0.3, 0.3],
+        });
+    }
+
+    for temp in &state.temp_entities {
+        let Some(origin) = temp.origin else {
+            continue;
+        };
+        let (radius, color) = match temp.kind {
+            qw_common::protocol::TE_EXPLOSION => (300.0, [1.0, 0.6, 0.2]),
+            qw_common::protocol::TE_TAREXPLOSION => (240.0, [0.7, 0.4, 1.0]),
+            qw_common::protocol::TE_LAVASPLASH => (200.0, [1.0, 0.4, 0.1]),
+            qw_common::protocol::TE_TELEPORT => (220.0, [0.6, 0.4, 1.0]),
+            qw_common::protocol::TE_LIGHTNINGBLOOD => (180.0, [1.0, 0.2, 0.2]),
+            _ => continue,
+        };
+        lights.push(RenderDynamicLight {
+            origin,
+            radius,
+            color,
+        });
+    }
+
+    lights
+}
+
+fn rgba_from_palette(palette: Option<&qw_common::Palette>, index: u8, alpha: u8) -> [u8; 4] {
+    let mut rgba = palette
+        .map(|palette| palette.rgba_for(index, None))
+        .unwrap_or([255, 255, 255, 255]);
+    rgba[3] = alpha;
+    rgba
+}
+
+fn rgba_from_rgb(color: [u8; 3], alpha: u8) -> [u8; 4] {
+    [color[0], color[1], color[2], alpha]
+}
+
+fn spread_offsets(count: usize, spread: f32) -> Vec<qw_common::Vec3> {
+    let mut offsets = Vec::with_capacity(count);
+    if count == 0 {
+        return offsets;
+    }
+    let golden_angle = 2.399963f32;
+    let total = count as f32;
+    for i in 0..count {
+        let t = i as f32 / total;
+        let radius = spread * t.sqrt();
+        let angle = i as f32 * golden_angle;
+        offsets.push(qw_common::Vec3::new(
+            radius * angle.cos(),
+            radius * angle.sin(),
+            (t - 0.5) * spread,
+        ));
+    }
+    offsets
+}
+
 fn push_render_entity(
     entities: &mut Vec<RenderEntity>,
     models: &[String],
@@ -525,6 +758,7 @@ fn build_render_models(models: &[Option<ModelAsset>]) -> Vec<Option<RenderModel>
                         width: texture.width,
                         height: texture.height,
                         rgba: texture.rgba.clone(),
+                        fullbright: texture.fullbright.clone(),
                     })
                     .collect();
                 RenderModel { kind, textures }
@@ -795,6 +1029,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 rgba: vec![1, 2, 3, 4],
+                fullbright: None,
             }],
         };
 

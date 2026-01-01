@@ -34,6 +34,7 @@ pub struct ModelTexture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub fullbright: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -141,6 +142,7 @@ fn build_alias_textures(model: &AliasModel, palette: Option<&Palette>) -> Vec<Mo
                     width: *width,
                     height: *height,
                     rgba: palette.expand_indices(indices, Some(255)),
+                    fullbright: build_fullbright_mask(indices, palette),
                 });
             }
             qw_common::MdlSkin::Group {
@@ -154,6 +156,7 @@ fn build_alias_textures(model: &AliasModel, palette: Option<&Palette>) -> Vec<Mo
                         width: *width,
                         height: *height,
                         rgba: palette.expand_indices(indices, Some(255)),
+                        fullbright: build_fullbright_mask(indices, palette),
                     });
                 }
             }
@@ -175,6 +178,7 @@ fn build_sprite_textures(sprite: &Sprite, palette: Option<&Palette>) -> Vec<Mode
                     width: image.width,
                     height: image.height,
                     rgba: image.expand_rgba(palette),
+                    fullbright: build_fullbright_mask(&image.pixels, palette),
                 });
             }
             SpriteFrame::Group { frames, .. } => {
@@ -183,6 +187,7 @@ fn build_sprite_textures(sprite: &Sprite, palette: Option<&Palette>) -> Vec<Mode
                         width: image.width,
                         height: image.height,
                         rgba: image.expand_rgba(palette),
+                        fullbright: build_fullbright_mask(&image.pixels, palette),
                     });
                 }
             }
@@ -190,4 +195,18 @@ fn build_sprite_textures(sprite: &Sprite, palette: Option<&Palette>) -> Vec<Mode
     }
 
     textures
+}
+
+fn build_fullbright_mask(indices: &[u8], palette: &Palette) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(indices.len() * 4);
+    let mut has_fullbright = false;
+    for &idx in indices {
+        if idx >= 224 && idx != 255 {
+            has_fullbright = true;
+            out.extend_from_slice(&palette.rgba_for(idx, Some(255)));
+        } else {
+            out.extend_from_slice(&[0, 0, 0, 0]);
+        }
+    }
+    if has_fullbright { Some(out) } else { None }
 }

@@ -5,13 +5,16 @@ use qw_common::{AliasModel, MdlFrame, SpriteImage, Vec3};
 #[cfg(feature = "glow")]
 use qw_renderer::RenderSurface;
 use qw_renderer::{
-    RenderDrawList, RenderEntity, RenderModel, RenderVertex, RenderView, RenderWorld, Renderer,
-    RendererConfig, ResolvedEntity, UiLayer, build_draw_list,
+    RenderBeam, RenderDrawList, RenderDynamicLight, RenderEntity, RenderModel, RenderParticle,
+    RenderVertex, RenderView, RenderWorld, Renderer, RendererConfig, ResolvedEntity, UiLayer,
+    build_draw_list,
 };
 #[cfg(any(feature = "glow", test))]
 use qw_renderer::{
     RenderEntityKind, RenderModelFrame, RenderModelKind, RenderModelTexture, UiText,
 };
+#[cfg(feature = "glow")]
+use std::cmp::Ordering;
 #[cfg(feature = "glow")]
 use std::ffi::c_void;
 
@@ -31,6 +34,7 @@ impl GlDevice {
         gl.depth_func(glow::LEQUAL);
         gl.enable(glow::CULL_FACE);
         gl.cull_face(glow::BACK);
+        gl.enable(glow::PROGRAM_POINT_SIZE);
         Self { gl }
     }
 
@@ -89,6 +93,15 @@ impl GlTexture {
     }
 
     unsafe fn from_rgba_mips(device: &GlDevice, texture: &GpuTexture) -> Self {
+        Self::from_rgba_mips_data(device, texture.width, texture.height, &texture.mips)
+    }
+
+    unsafe fn from_rgba_mips_data(
+        device: &GlDevice,
+        width: u32,
+        height: u32,
+        mips: &[Vec<u8>; 4],
+    ) -> Self {
         let gl = &device.gl;
         let id = gl.create_texture().expect("gl texture");
         gl.bind_texture(glow::TEXTURE_2D, Some(id));
@@ -105,12 +118,12 @@ impl GlTexture {
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
 
-        for (level, mip) in texture.mips.iter().enumerate() {
+        for (level, mip) in mips.iter().enumerate() {
             if mip.is_empty() {
                 continue;
             }
-            let level_width = (texture.width >> level).max(1) as i32;
-            let level_height = (texture.height >> level).max(1) as i32;
+            let level_width = (width >> level).max(1) as i32;
+            let level_height = (height >> level).max(1) as i32;
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 level as i32,
@@ -125,11 +138,7 @@ impl GlTexture {
         }
         gl.generate_mipmap(glow::TEXTURE_2D);
 
-        Self {
-            id,
-            width: texture.width,
-            height: texture.height,
-        }
+        Self { id, width, height }
     }
 
     unsafe fn from_r8(device: &GlDevice, width: u32, height: u32, data: &[u8]) -> Self {
@@ -297,9 +306,19 @@ struct GlProgram {
     model: Option<glow::UniformLocation>,
     base_sampler: Option<glow::UniformLocation>,
     lightmap_sampler: Option<glow::UniformLocation>,
+    fullbright_sampler: Option<glow::UniformLocation>,
     debug_mode: Option<glow::UniformLocation>,
     time: Option<glow::UniformLocation>,
     surface_mode: Option<glow::UniformLocation>,
+    surface_alpha: Option<glow::UniformLocation>,
+    view_origin: Option<glow::UniformLocation>,
+    gamma: Option<glow::UniformLocation>,
+    fog_color: Option<glow::UniformLocation>,
+    fog_density: Option<glow::UniformLocation>,
+    light_count: Option<glow::UniformLocation>,
+    light_positions: Option<glow::UniformLocation>,
+    light_colors: Option<glow::UniformLocation>,
+    light_radii: Option<glow::UniformLocation>,
 }
 
 #[cfg(feature = "glow")]
@@ -318,25 +337,38 @@ uniform int u_surface_mode;
 
 out vec2 v_uv;
 out vec2 v_light_uv;
-out vec3 v_pos;
+out vec3 v_world_pos;
 
 void main() {
     v_uv = a_uv;
     v_light_uv = a_light_uv;
-    v_pos = a_pos;
-    gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
+    vec4 world_pos = u_model * vec4(a_pos, 1.0);
+    v_world_pos = world_pos.xyz;
+    gl_Position = u_view_proj * world_pos;
 }
 "#;
         let fragment_source = r#"#version 330 core
 in vec2 v_uv;
 in vec2 v_light_uv;
-in vec3 v_pos;
+in vec3 v_world_pos;
 
 uniform sampler2D u_base_tex;
 uniform sampler2D u_lightmap_tex;
+uniform sampler2D u_fullbright_tex;
 uniform int u_debug_mode;
 uniform float u_time;
 uniform int u_surface_mode;
+uniform float u_surface_alpha;
+uniform vec3 u_view_origin;
+uniform float u_gamma;
+uniform vec3 u_fog_color;
+uniform float u_fog_density;
+
+const int MAX_DLIGHTS = 16;
+uniform int u_light_count;
+uniform vec3 u_light_pos[MAX_DLIGHTS];
+uniform vec3 u_light_color[MAX_DLIGHTS];
+uniform float u_light_radius[MAX_DLIGHTS];
 
 out vec4 frag_color;
 
@@ -345,15 +377,41 @@ void main() {
     if (u_surface_mode == 2) {
         uv.x += sin((uv.y + u_time) * 4.0) * 0.03;
         uv.y += cos((uv.x + u_time) * 4.0) * 0.03;
-    } else if (u_surface_mode == 1) {
-        uv += vec2(u_time * 0.01, u_time * 0.01);
     }
     vec4 base = texture(u_base_tex, uv);
-    float light = u_surface_mode == 1 ? 1.0 : texture(u_lightmap_tex, v_light_uv).r;
+    vec4 fullbright = texture(u_fullbright_tex, uv);
+    float light = texture(u_lightmap_tex, v_light_uv).r;
+    if (u_surface_mode == 1) {
+        vec2 slow_uv = uv + vec2(u_time * 0.003, u_time * 0.002);
+        vec2 fast_uv = uv * 2.0 + vec2(-u_time * 0.01, u_time * 0.008);
+        vec3 slow = texture(u_base_tex, slow_uv).rgb;
+        vec3 fast = texture(u_base_tex, fast_uv).rgb;
+        vec3 sky = mix(slow, fast, 0.5);
+        base = vec4(sky, 1.0);
+        fullbright = vec4(0.0);
+        light = 1.0;
+    }
+    vec3 dynamic_light = vec3(0.0);
+    if (u_surface_mode != 1) {
+        for (int i = 0; i < u_light_count; ++i) {
+            float dist = distance(v_world_pos, u_light_pos[i]);
+            float atten = clamp(1.0 - dist / u_light_radius[i], 0.0, 1.0);
+            dynamic_light += u_light_color[i] * atten;
+        }
+    }
     if (u_debug_mode == 1) {
         frag_color = vec4(light, light, light, 1.0);
     } else {
-        frag_color = vec4(base.rgb * light, base.a);
+        vec3 color = base.rgb * light + fullbright.rgb + dynamic_light;
+        float alpha = base.a * u_surface_alpha;
+        if (u_fog_density > 0.0) {
+            float dist = length(v_world_pos - u_view_origin);
+            float fog = clamp(1.0 - exp(-u_fog_density * dist), 0.0, 1.0);
+            color = mix(color, u_fog_color, fog);
+        }
+        float safe_gamma = max(u_gamma, 0.01);
+        color = pow(color, vec3(1.0 / safe_gamma));
+        frag_color = vec4(color, alpha);
     }
 }
 "#;
@@ -380,14 +438,27 @@ void main() {
         let model = gl.get_uniform_location(program, "u_model");
         let base_sampler = gl.get_uniform_location(program, "u_base_tex");
         let lightmap_sampler = gl.get_uniform_location(program, "u_lightmap_tex");
+        let fullbright_sampler = gl.get_uniform_location(program, "u_fullbright_tex");
         let debug_mode = gl.get_uniform_location(program, "u_debug_mode");
         let time = gl.get_uniform_location(program, "u_time");
         let surface_mode = gl.get_uniform_location(program, "u_surface_mode");
+        let surface_alpha = gl.get_uniform_location(program, "u_surface_alpha");
+        let view_origin = gl.get_uniform_location(program, "u_view_origin");
+        let gamma = gl.get_uniform_location(program, "u_gamma");
+        let fog_color = gl.get_uniform_location(program, "u_fog_color");
+        let fog_density = gl.get_uniform_location(program, "u_fog_density");
+        let light_count = gl.get_uniform_location(program, "u_light_count");
+        let light_positions = gl.get_uniform_location(program, "u_light_pos[0]");
+        let light_colors = gl.get_uniform_location(program, "u_light_color[0]");
+        let light_radii = gl.get_uniform_location(program, "u_light_radius[0]");
         if let Some(location) = base_sampler.as_ref() {
             gl.uniform_1_i32(Some(location), 0);
         }
         if let Some(location) = lightmap_sampler.as_ref() {
             gl.uniform_1_i32(Some(location), 1);
+        }
+        if let Some(location) = fullbright_sampler.as_ref() {
+            gl.uniform_1_i32(Some(location), 2);
         }
         gl.use_program(None);
 
@@ -397,9 +468,19 @@ void main() {
             model,
             base_sampler,
             lightmap_sampler,
+            fullbright_sampler,
             debug_mode,
             time,
             surface_mode,
+            surface_alpha,
+            view_origin,
+            gamma,
+            fog_color,
+            fog_density,
+            light_count,
+            light_positions,
+            light_colors,
+            light_radii,
         }
     }
 }
@@ -453,6 +534,7 @@ impl GlDynamicMesh {
 #[cfg(feature = "glow")]
 struct GlModel {
     textures: Vec<GlTexture>,
+    fullbright_textures: Vec<Option<GlTexture>>,
 }
 
 #[cfg(feature = "glow")]
@@ -465,7 +547,136 @@ impl GlModel {
                 GlTexture::from_rgba(device, texture.width, texture.height, &texture.rgba)
             })
             .collect();
-        Self { textures }
+        let fullbright_textures = model
+            .textures
+            .iter()
+            .map(|texture| {
+                texture
+                    .fullbright
+                    .as_ref()
+                    .map(|rgba| GlTexture::from_rgba(device, texture.width, texture.height, rgba))
+            })
+            .collect();
+        Self {
+            textures,
+            fullbright_textures,
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlColorProgram {
+    program: glow::Program,
+    view_proj: Option<glow::UniformLocation>,
+    gamma: Option<glow::UniformLocation>,
+}
+
+#[cfg(feature = "glow")]
+impl GlColorProgram {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vertex_source = r#"#version 330 core
+layout (location = 0) in vec3 a_pos;
+layout (location = 1) in vec4 a_color;
+layout (location = 2) in float a_size;
+
+uniform mat4 u_view_proj;
+
+out vec4 v_color;
+
+void main() {
+    v_color = a_color;
+    gl_Position = u_view_proj * vec4(a_pos, 1.0);
+    gl_PointSize = a_size;
+}
+"#;
+        let fragment_source = r#"#version 330 core
+in vec4 v_color;
+
+uniform float u_gamma;
+
+out vec4 frag_color;
+
+void main() {
+    float safe_gamma = max(u_gamma, 0.01);
+    vec3 color = pow(v_color.rgb, vec3(1.0 / safe_gamma));
+    frag_color = vec4(color, v_color.a);
+}
+"#;
+
+        let vertex = compile_shader(gl, glow::VERTEX_SHADER, vertex_source);
+        let fragment = compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source);
+        let program = gl.create_program().expect("gl color program");
+        gl.attach_shader(program, vertex);
+        gl.attach_shader(program, fragment);
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            panic!(
+                "gl color program link failed: {}",
+                gl.get_program_info_log(program)
+            );
+        }
+        gl.detach_shader(program, vertex);
+        gl.detach_shader(program, fragment);
+        gl.delete_shader(vertex);
+        gl.delete_shader(fragment);
+
+        gl.use_program(Some(program));
+        let view_proj = gl.get_uniform_location(program, "u_view_proj");
+        let gamma = gl.get_uniform_location(program, "u_gamma");
+        gl.use_program(None);
+
+        Self {
+            program,
+            view_proj,
+            gamma,
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlColorMesh {
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    capacity: usize,
+}
+
+#[cfg(feature = "glow")]
+impl GlColorMesh {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vao = gl.create_vertex_array().expect("gl color vao");
+        let vbo = gl.create_buffer().expect("gl color vbo");
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_size(glow::ARRAY_BUFFER, 0, glow::DYNAMIC_DRAW);
+        let stride = (8 * std::mem::size_of::<f32>()) as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 4, glow::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 28);
+        gl.bind_vertex_array(None);
+        Self {
+            vao,
+            vbo,
+            capacity: 0,
+        }
+    }
+
+    unsafe fn upload(&mut self, device: &GlDevice, vertices: &[f32]) {
+        let gl = &device.gl;
+        gl.bind_vertex_array(Some(self.vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+        let byte_len = vertices.len() * std::mem::size_of::<f32>();
+        let bytes = std::slice::from_raw_parts(vertices.as_ptr() as *const u8, byte_len);
+        if byte_len > self.capacity {
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            self.capacity = byte_len;
+        } else {
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        }
     }
 }
 
@@ -592,7 +803,10 @@ struct GlState {
     program: GlProgram,
     fallback_base: GlTexture,
     fallback_lightmap: GlTexture,
+    fallback_fullbright: GlTexture,
     alias_mesh: GlDynamicMesh,
+    color_program: GlColorProgram,
+    color_mesh: GlColorMesh,
     ui_program: GlUiProgram,
     ui_font: GlTexture,
     ui_mesh: GlUiMesh,
@@ -604,7 +818,10 @@ impl GlState {
         let program = GlProgram::new(device);
         let fallback_base = GlTexture::from_rgba(device, 1, 1, &[255, 255, 255, 255]);
         let fallback_lightmap = GlTexture::from_r8(device, 1, 1, &[255]);
+        let fallback_fullbright = GlTexture::from_rgba(device, 1, 1, &[0, 0, 0, 0]);
         let alias_mesh = GlDynamicMesh::new(device);
+        let color_program = GlColorProgram::new(device);
+        let color_mesh = GlColorMesh::new(device);
         let ui_program = GlUiProgram::new(device);
         let font_data = build_font_texture();
         let ui_font =
@@ -614,7 +831,10 @@ impl GlState {
             program,
             fallback_base,
             fallback_lightmap,
+            fallback_fullbright,
             alias_mesh,
+            color_program,
+            color_mesh,
             ui_program,
             ui_font,
             ui_mesh,
@@ -735,6 +955,7 @@ fn build_font_texture() -> Vec<u8> {
 #[cfg(feature = "glow")]
 struct GlWorld {
     textures: Vec<GlTexture>,
+    fullbright_textures: Vec<Option<GlTexture>>,
     lightmaps: Vec<GlTexture>,
     mesh: GlMesh,
     draws: Vec<GlSurfaceDraw>,
@@ -748,6 +969,15 @@ impl GlWorld {
             .iter()
             .map(|texture| GlTexture::from_rgba_mips(device, texture))
             .collect();
+        let fullbright_textures = world
+            .textures
+            .iter()
+            .map(|texture| {
+                texture.fullbright.as_ref().map(|mips| {
+                    GlTexture::from_rgba_mips_data(device, texture.width, texture.height, mips)
+                })
+            })
+            .collect();
         let lightmaps = world
             .lightmaps
             .iter()
@@ -756,6 +986,7 @@ impl GlWorld {
         let (mesh, draws) = GlMesh::from_world(device, world);
         Self {
             textures,
+            fullbright_textures,
             lightmaps,
             mesh,
             draws,
@@ -1087,6 +1318,7 @@ pub struct GpuTexture {
     pub width: u32,
     pub height: u32,
     pub mips: [Vec<u8>; 4],
+    pub fullbright: Option<[Vec<u8>; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1119,6 +1351,7 @@ fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
             width: texture.width,
             height: texture.height,
             mips: texture.mips.clone(),
+            fullbright: texture.fullbright.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -1160,6 +1393,9 @@ pub struct GlRenderer {
     last_view: Option<RenderView>,
     last_world: Option<RenderWorld>,
     entities: Vec<RenderEntity>,
+    particles: Vec<RenderParticle>,
+    beams: Vec<RenderBeam>,
+    dynamic_lights: Vec<RenderDynamicLight>,
     models: Vec<Option<RenderModel>>,
     #[cfg(feature = "glow")]
     gl_device: Option<GlDevice>,
@@ -1173,6 +1409,17 @@ pub struct GlRenderer {
     ui: UiLayer,
     debug_wireframe: bool,
     debug_lightmap: bool,
+    gamma: f32,
+    fog_settings: Option<FogSettings>,
+    water_alpha: f32,
+    lava_alpha: f32,
+    slime_alpha: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FogSettings {
+    color: [f32; 3],
+    density: f32,
 }
 
 impl GlRenderer {
@@ -1183,6 +1430,9 @@ impl GlRenderer {
             last_view: None,
             last_world: None,
             entities: Vec::new(),
+            particles: Vec::new(),
+            beams: Vec::new(),
+            dynamic_lights: Vec::new(),
             models: Vec::new(),
             #[cfg(feature = "glow")]
             gl_device: None,
@@ -1196,6 +1446,11 @@ impl GlRenderer {
             ui: UiLayer::default(),
             debug_wireframe: false,
             debug_lightmap: false,
+            gamma: 1.0,
+            fog_settings: None,
+            water_alpha: 0.7,
+            lava_alpha: 0.5,
+            slime_alpha: 0.6,
         }
     }
 
@@ -1228,6 +1483,18 @@ impl GlRenderer {
 
     pub fn set_entities(&mut self, entities: Vec<RenderEntity>) {
         self.entities = entities;
+    }
+
+    pub fn set_particles(&mut self, particles: Vec<RenderParticle>) {
+        self.particles = particles;
+    }
+
+    pub fn set_beams(&mut self, beams: Vec<RenderBeam>) {
+        self.beams = beams;
+    }
+
+    pub fn set_dynamic_lights(&mut self, lights: Vec<RenderDynamicLight>) {
+        self.dynamic_lights = lights;
     }
 
     pub fn set_models(&mut self, models: Vec<Option<RenderModel>>) {
@@ -1322,6 +1589,23 @@ impl GlRenderer {
         self.debug_lightmap = enabled;
     }
 
+    pub fn set_gamma(&mut self, gamma: f32) {
+        self.gamma = gamma.max(0.01);
+    }
+
+    pub fn set_fog(&mut self, fog: Option<[f32; 4]>) {
+        self.fog_settings = fog.map(|value| FogSettings {
+            color: [value[0], value[1], value[2]],
+            density: value[3].max(0.0),
+        });
+    }
+
+    pub fn set_surface_alphas(&mut self, water: f32, lava: f32, slime: f32) {
+        self.water_alpha = water.clamp(0.0, 1.0);
+        self.lava_alpha = lava.clamp(0.0, 1.0);
+        self.slime_alpha = slime.clamp(0.0, 1.0);
+    }
+
     pub fn gpu_world(&self) -> Option<&GpuWorld> {
         self.gpu_world.as_ref()
     }
@@ -1382,6 +1666,10 @@ impl GlRenderer {
         let model_identity = Mat4::identity();
         let gl = &device.gl;
         let time = self.frame_index as f32 * (1.0 / 60.0);
+        let fog = self.fog_settings.unwrap_or(FogSettings {
+            color: [0.0, 0.0, 0.0],
+            density: 0.0,
+        });
         unsafe {
             gl.use_program(Some(gl_state.program.program));
             if let Some(location) = gl_state.program.view_proj.as_ref() {
@@ -1396,6 +1684,22 @@ impl GlRenderer {
             if let Some(location) = gl_state.program.surface_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), 0);
             }
+            if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                gl.uniform_1_f32(Some(location), 1.0);
+            }
+            if let Some(location) = gl_state.program.view_origin.as_ref() {
+                gl.uniform_3_f32(Some(location), view.origin.x, view.origin.y, view.origin.z);
+            }
+            if let Some(location) = gl_state.program.gamma.as_ref() {
+                gl.uniform_1_f32(Some(location), self.gamma);
+            }
+            if let Some(location) = gl_state.program.fog_color.as_ref() {
+                gl.uniform_3_f32(Some(location), fog.color[0], fog.color[1], fog.color[2]);
+            }
+            if let Some(location) = gl_state.program.fog_density.as_ref() {
+                gl.uniform_1_f32(Some(location), fog.density);
+            }
+            set_dynamic_light_uniforms(gl, &gl_state.program, &self.dynamic_lights);
             let debug_mode = if self.debug_lightmap { 1 } else { 0 };
             if let Some(location) = gl_state.program.debug_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), debug_mode);
@@ -1417,6 +1721,15 @@ impl GlRenderer {
                         let mode = surface_mode(surface);
                         gl.uniform_1_i32(Some(location), mode);
                     }
+                    if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                        let alpha = surface_alpha(
+                            surface,
+                            self.water_alpha,
+                            self.lava_alpha,
+                            self.slime_alpha,
+                        );
+                        gl.uniform_1_f32(Some(location), alpha);
+                    }
                 }
                 let Some(draw) = gl_world.draws.get(surface_index) else {
                     return;
@@ -1430,6 +1743,10 @@ impl GlRenderer {
                 let base = texture_index
                     .and_then(|index| gl_world.textures.get(index))
                     .unwrap_or(&gl_state.fallback_base);
+                let fullbright = texture_index
+                    .and_then(|index| gl_world.fullbright_textures.get(index))
+                    .and_then(|entry| entry.as_ref())
+                    .unwrap_or(&gl_state.fallback_fullbright);
                 let lightmap = draw
                     .lightmap_index
                     .and_then(|index| gl_world.lightmaps.get(index))
@@ -1438,6 +1755,8 @@ impl GlRenderer {
                 gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(lightmap.id));
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(fullbright.id));
                 let offset_bytes = draw.index_offset * std::mem::size_of::<u32>() as i32;
                 gl.draw_elements(
                     glow::TRIANGLES,
@@ -1459,11 +1778,15 @@ impl GlRenderer {
                 world,
                 gl_world,
                 &frustum,
+                view.origin,
                 false,
                 time,
             );
             if let Some(location) = gl_state.program.surface_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), 0);
+            }
+            if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                gl.uniform_1_f32(Some(location), 1.0);
             }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
@@ -1488,7 +1811,9 @@ impl GlRenderer {
                 gl.uniform_1_i32(Some(location), debug_mode);
             }
             gl.bind_vertex_array(Some(gl_world.mesh.vao));
-            for &surface_index in &draw_list.transparent_surfaces {
+            let mut transparent_surfaces = draw_list.transparent_surfaces.clone();
+            sort_surface_indices(world, view.origin, &mut transparent_surfaces);
+            for surface_index in transparent_surfaces {
                 draw_surface(surface_index);
             }
             self.draw_brush_entities(
@@ -1498,11 +1823,15 @@ impl GlRenderer {
                 world,
                 gl_world,
                 &frustum,
+                view.origin,
                 true,
                 time,
             );
             if let Some(location) = gl_state.program.surface_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), 0);
+            }
+            if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                gl.uniform_1_f32(Some(location), 1.0);
             }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
@@ -1510,21 +1839,19 @@ impl GlRenderer {
             if let Some(location) = gl_state.program.debug_mode.as_ref() {
                 gl.uniform_1_i32(Some(location), 0);
             }
-            self.draw_alias_entities(
-                device,
-                gl_state,
-                &draw_list.transparent_entities,
-                &frustum,
-                time,
-            );
+            let mut transparent_entities = draw_list.transparent_entities.clone();
+            sort_entities(view.origin, &mut transparent_entities);
+            self.draw_alias_entities(device, gl_state, &transparent_entities, &frustum, time);
             self.draw_sprite_entities(
                 device,
                 gl_state,
-                &draw_list.transparent_entities,
+                &transparent_entities,
                 view,
                 &frustum,
                 time,
             );
+            self.draw_particles(device, gl_state, &view_proj);
+            self.draw_beams(device, gl_state, &view_proj);
             gl.depth_mask(true);
             if self.debug_wireframe {
                 gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
@@ -1545,6 +1872,7 @@ impl GlRenderer {
         world: &RenderWorld,
         gl_world: &GlWorld,
         frustum: &Frustum,
+        view_origin: Vec3,
         transparent: bool,
         time: f32,
     ) {
@@ -1583,7 +1911,57 @@ impl GlRenderer {
                 }
             }
             let entity_transparent = entity.alpha < 1.0;
-            for &surface_index in &brush_model.surfaces {
+            let mut surface_indices = brush_model.surfaces.clone();
+            if transparent {
+                surface_indices.sort_by(|a, b| {
+                    let dist_a = world
+                        .surfaces
+                        .get(*a)
+                        .map(|surface| {
+                            let center = surface.bounds.center;
+                            let world_center = Vec3::new(
+                                translation.x
+                                    + right.x * center.x
+                                    + up.x * center.y
+                                    + forward.x * center.z,
+                                translation.y
+                                    + right.y * center.x
+                                    + up.y * center.y
+                                    + forward.y * center.z,
+                                translation.z
+                                    + right.z * center.x
+                                    + up.z * center.y
+                                    + forward.z * center.z,
+                            );
+                            distance_sq(world_center, view_origin)
+                        })
+                        .unwrap_or(0.0);
+                    let dist_b = world
+                        .surfaces
+                        .get(*b)
+                        .map(|surface| {
+                            let center = surface.bounds.center;
+                            let world_center = Vec3::new(
+                                translation.x
+                                    + right.x * center.x
+                                    + up.x * center.y
+                                    + forward.x * center.z,
+                                translation.y
+                                    + right.y * center.x
+                                    + up.y * center.y
+                                    + forward.y * center.z,
+                                translation.z
+                                    + right.z * center.x
+                                    + up.z * center.y
+                                    + forward.z * center.z,
+                            );
+                            distance_sq(world_center, view_origin)
+                        })
+                        .unwrap_or(0.0);
+                    dist_b.partial_cmp(&dist_a).unwrap_or(Ordering::Equal)
+                });
+            }
+            for surface_index in surface_indices {
                 let Some(surface) = world.surfaces.get(surface_index) else {
                     continue;
                 };
@@ -1593,10 +1971,18 @@ impl GlRenderer {
                         gl.uniform_1_i32(Some(location), mode);
                     }
                 }
+                if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                    let alpha =
+                        surface_alpha(surface, self.water_alpha, self.lava_alpha, self.slime_alpha)
+                            * entity.alpha.clamp(0.0, 1.0);
+                    unsafe {
+                        gl.uniform_1_f32(Some(location), alpha);
+                    }
+                }
                 let surface_transparent = surface
                     .texture_name
                     .as_deref()
-                    .is_some_and(|name| name.starts_with('{'));
+                    .is_some_and(|name| name.starts_with('{') || name.starts_with('*'));
                 if entity_transparent {
                     if !transparent {
                         continue;
@@ -1616,6 +2002,10 @@ impl GlRenderer {
                 let base = texture_index
                     .and_then(|index| gl_world.textures.get(index))
                     .unwrap_or(&gl_state.fallback_base);
+                let fullbright = texture_index
+                    .and_then(|index| gl_world.fullbright_textures.get(index))
+                    .and_then(|entry| entry.as_ref())
+                    .unwrap_or(&gl_state.fallback_fullbright);
                 let lightmap = draw
                     .lightmap_index
                     .and_then(|index| gl_world.lightmaps.get(index))
@@ -1625,6 +2015,8 @@ impl GlRenderer {
                     gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
                     gl.active_texture(glow::TEXTURE1);
                     gl.bind_texture(glow::TEXTURE_2D, Some(lightmap.id));
+                    gl.active_texture(glow::TEXTURE2);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(fullbright.id));
                     let offset_bytes = draw.index_offset * std::mem::size_of::<u32>() as i32;
                     gl.draw_elements(
                         glow::TRIANGLES,
@@ -1681,18 +2073,27 @@ impl GlRenderer {
             let base = texture_index
                 .and_then(|index| gl_model.and_then(|model| model.textures.get(index)))
                 .unwrap_or(&gl_state.fallback_base);
+            let fullbright = texture_index
+                .and_then(|index| gl_model.and_then(|model| model.fullbright_textures.get(index)))
+                .and_then(|entry| entry.as_ref())
+                .unwrap_or(&gl_state.fallback_fullbright);
 
             let vertices = build_alias_vertices(alias_model, frame, entity);
             if vertices.is_empty() {
                 continue;
             }
             unsafe {
+                if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                    gl.uniform_1_f32(Some(location), entity.alpha.clamp(0.0, 1.0));
+                }
                 gl_state.alias_mesh.upload(device, &vertices);
                 gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(gl_state.fallback_lightmap.id));
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(fullbright.id));
                 gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 7) as i32);
             }
         }
@@ -1745,22 +2146,96 @@ impl GlRenderer {
             let base = texture_index
                 .and_then(|index| gl_model.and_then(|model| model.textures.get(index)))
                 .unwrap_or(&gl_state.fallback_base);
+            let fullbright = texture_index
+                .and_then(|index| gl_model.and_then(|model| model.fullbright_textures.get(index)))
+                .and_then(|entry| entry.as_ref())
+                .unwrap_or(&gl_state.fallback_fullbright);
 
             let vertices = build_sprite_vertices(entity, image, view_right, view_up);
             if vertices.is_empty() {
                 continue;
             }
             unsafe {
+                if let Some(location) = gl_state.program.surface_alpha.as_ref() {
+                    gl.uniform_1_f32(Some(location), entity.alpha.clamp(0.0, 1.0));
+                }
                 gl_state.alias_mesh.upload(device, &vertices);
                 gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
                 gl.active_texture(glow::TEXTURE0);
                 gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
                 gl.active_texture(glow::TEXTURE1);
                 gl.bind_texture(glow::TEXTURE_2D, Some(gl_state.fallback_lightmap.id));
+                gl.active_texture(glow::TEXTURE2);
+                gl.bind_texture(glow::TEXTURE_2D, Some(fullbright.id));
                 gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 7) as i32);
             }
         }
         unsafe {
+            gl.enable(glow::CULL_FACE);
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_particles(&self, device: &GlDevice, gl_state: &mut GlState, view_proj: &Mat4) {
+        if self.particles.is_empty() {
+            return;
+        }
+        let vertices = build_particle_vertices(&self.particles);
+        if vertices.is_empty() {
+            return;
+        }
+        let gl = &device.gl;
+        unsafe {
+            gl.use_program(Some(gl_state.color_program.program));
+            if let Some(location) = gl_state.color_program.view_proj.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &view_proj.data);
+            }
+            if let Some(location) = gl_state.color_program.gamma.as_ref() {
+                gl.uniform_1_f32(Some(location), self.gamma);
+            }
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE);
+            gl.disable(glow::CULL_FACE);
+            gl.bind_vertex_array(Some(gl_state.color_mesh.vao));
+            gl_state.color_mesh.upload(device, &vertices);
+            gl.draw_arrays(glow::POINTS, 0, (vertices.len() / 8) as i32);
+            gl.bind_vertex_array(None);
+            gl.enable(glow::CULL_FACE);
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_beams(&self, device: &GlDevice, gl_state: &mut GlState, view_proj: &Mat4) {
+        if self.beams.is_empty() {
+            return;
+        }
+        let vertices = build_beam_vertices(&self.beams);
+        if vertices.is_empty() {
+            return;
+        }
+        let max_width = self
+            .beams
+            .iter()
+            .map(|beam| beam.width.max(1.0))
+            .fold(1.0, f32::max);
+        let gl = &device.gl;
+        unsafe {
+            gl.use_program(Some(gl_state.color_program.program));
+            if let Some(location) = gl_state.color_program.view_proj.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &view_proj.data);
+            }
+            if let Some(location) = gl_state.color_program.gamma.as_ref() {
+                gl.uniform_1_f32(Some(location), self.gamma);
+            }
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE);
+            gl.disable(glow::CULL_FACE);
+            gl.line_width(max_width);
+            gl.bind_vertex_array(Some(gl_state.color_mesh.vao));
+            gl_state.color_mesh.upload(device, &vertices);
+            gl.draw_arrays(glow::LINES, 0, (vertices.len() / 8) as i32);
+            gl.bind_vertex_array(None);
+            gl.line_width(1.0);
             gl.enable(glow::CULL_FACE);
         }
     }
@@ -1934,6 +2409,59 @@ fn build_sprite_vertices(
 }
 
 #[cfg(feature = "glow")]
+fn build_particle_vertices(particles: &[RenderParticle]) -> Vec<f32> {
+    let mut vertices = Vec::with_capacity(particles.len() * 8);
+    for particle in particles {
+        let color = [
+            particle.color[0] as f32 / 255.0,
+            particle.color[1] as f32 / 255.0,
+            particle.color[2] as f32 / 255.0,
+            particle.color[3] as f32 / 255.0,
+        ];
+        let size = particle.size.max(1.0);
+        vertices.extend_from_slice(&[
+            particle.position.x,
+            particle.position.y,
+            particle.position.z,
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            size,
+        ]);
+    }
+    vertices
+}
+
+#[cfg(feature = "glow")]
+fn build_beam_vertices(beams: &[RenderBeam]) -> Vec<f32> {
+    let mut vertices = Vec::with_capacity(beams.len() * 2 * 8);
+    for beam in beams {
+        let color = [
+            beam.color[0] as f32 / 255.0,
+            beam.color[1] as f32 / 255.0,
+            beam.color[2] as f32 / 255.0,
+            beam.color[3] as f32 / 255.0,
+        ];
+        let width = beam.width.max(1.0);
+        vertices.extend_from_slice(&[
+            beam.start.x,
+            beam.start.y,
+            beam.start.z,
+            color[0],
+            color[1],
+            color[2],
+            color[3],
+            width,
+        ]);
+        vertices.extend_from_slice(&[
+            beam.end.x, beam.end.y, beam.end.z, color[0], color[1], color[2], color[3], width,
+        ]);
+    }
+    vertices
+}
+
+#[cfg(feature = "glow")]
 fn build_ui_vertices(text: &UiText) -> Vec<f32> {
     let cell = FONT_CELL as f32;
     let atlas_w = FONT_ATLAS_WIDTH as f32;
@@ -1972,6 +2500,95 @@ fn build_ui_vertices(text: &UiText) -> Vec<f32> {
     }
 
     vertices
+}
+
+#[cfg(feature = "glow")]
+const MAX_DLIGHTS: usize = 16;
+
+#[cfg(feature = "glow")]
+unsafe fn set_dynamic_light_uniforms(
+    gl: &glow::Context,
+    program: &GlProgram,
+    lights: &[RenderDynamicLight],
+) {
+    let count = lights.len().min(MAX_DLIGHTS);
+    let mut positions = [0.0f32; MAX_DLIGHTS * 3];
+    let mut colors = [0.0f32; MAX_DLIGHTS * 3];
+    let mut radii = [0.0f32; MAX_DLIGHTS];
+    for (index, light) in lights.iter().take(count).enumerate() {
+        let base = index * 3;
+        positions[base] = light.origin.x;
+        positions[base + 1] = light.origin.y;
+        positions[base + 2] = light.origin.z;
+        colors[base] = light.color[0];
+        colors[base + 1] = light.color[1];
+        colors[base + 2] = light.color[2];
+        radii[index] = light.radius.max(0.01);
+    }
+    if let Some(location) = program.light_count.as_ref() {
+        gl.uniform_1_i32(Some(location), count as i32);
+    }
+    if let Some(location) = program.light_positions.as_ref() {
+        gl.uniform_3_f32_slice(Some(location), &positions);
+    }
+    if let Some(location) = program.light_colors.as_ref() {
+        gl.uniform_3_f32_slice(Some(location), &colors);
+    }
+    if let Some(location) = program.light_radii.as_ref() {
+        gl.uniform_1_f32_slice(Some(location), &radii);
+    }
+}
+
+#[cfg(feature = "glow")]
+fn surface_alpha(surface: &RenderSurface, water: f32, lava: f32, slime: f32) -> f32 {
+    let Some(name) = surface.texture_name.as_deref() else {
+        return 1.0;
+    };
+    if !name.starts_with('*') {
+        return 1.0;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("lava") {
+        lava
+    } else if lower.contains("slime") {
+        slime
+    } else {
+        water
+    }
+}
+
+#[cfg(feature = "glow")]
+fn sort_surface_indices(world: &RenderWorld, view_origin: Vec3, surfaces: &mut Vec<usize>) {
+    surfaces.sort_by(|a, b| {
+        let dist_a = world
+            .surfaces
+            .get(*a)
+            .map(|surface| distance_sq(surface.bounds.center, view_origin))
+            .unwrap_or(0.0);
+        let dist_b = world
+            .surfaces
+            .get(*b)
+            .map(|surface| distance_sq(surface.bounds.center, view_origin))
+            .unwrap_or(0.0);
+        dist_b.partial_cmp(&dist_a).unwrap_or(Ordering::Equal)
+    });
+}
+
+#[cfg(feature = "glow")]
+fn sort_entities(view_origin: Vec3, entities: &mut Vec<RenderEntity>) {
+    entities.sort_by(|a, b| {
+        let dist_a = distance_sq(a.origin, view_origin);
+        let dist_b = distance_sq(b.origin, view_origin);
+        dist_b.partial_cmp(&dist_a).unwrap_or(Ordering::Equal)
+    });
+}
+
+#[cfg(feature = "glow")]
+fn distance_sq(a: Vec3, b: Vec3) -> f32 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    dx * dx + dy * dy + dz * dz
 }
 
 #[cfg(feature = "glow")]
@@ -2069,6 +2686,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 rgba: vec![0, 0, 0, 255],
+                fullbright: None,
             }],
         })];
         renderer.set_models(models.clone());
@@ -2100,6 +2718,7 @@ mod tests {
                 width: 1,
                 height: 1,
                 rgba: vec![9, 9, 9, 255],
+                fullbright: None,
             }],
         };
 

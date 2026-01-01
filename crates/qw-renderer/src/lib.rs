@@ -63,6 +63,7 @@ pub struct RenderTexture {
     pub width: u32,
     pub height: u32,
     pub mips: [Vec<u8>; 4],
+    pub fullbright: Option<[Vec<u8>; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +136,28 @@ pub enum RenderEntityKind {
     Sprite,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderDynamicLight {
+    pub origin: Vec3,
+    pub radius: f32,
+    pub color: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderParticle {
+    pub position: Vec3,
+    pub color: [u8; 4],
+    pub size: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderBeam {
+    pub start: Vec3,
+    pub end: Vec3,
+    pub color: [u8; 4],
+    pub width: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderEntity {
     pub kind: RenderEntityKind,
@@ -159,6 +182,7 @@ pub struct RenderModelTexture {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub fullbright: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -304,7 +328,7 @@ fn is_transparent_surface(surface: &RenderSurface) -> bool {
     surface
         .texture_name
         .as_deref()
-        .is_some_and(|name| name.starts_with('{'))
+        .is_some_and(|name| name.starts_with('{') || name.starts_with('*'))
 }
 
 fn is_transparent_entity(entity: &RenderEntity) -> bool {
@@ -581,11 +605,13 @@ fn build_textures(
         let mips = std::array::from_fn(|level| {
             palette.expand_indices(&mip.mips[level], transparent_index)
         });
+        let fullbright = build_fullbright_mips(mip, palette, transparent_index);
         textures.push(RenderTexture {
             name: texture.name.clone(),
             width: mip.width,
             height: mip.height,
             mips,
+            fullbright,
         });
         texture_map[index] = Some(textures.len() - 1);
     }
@@ -630,6 +656,27 @@ fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f3
         return None;
     }
     Some((texture.width as f32, texture.height as f32))
+}
+
+fn build_fullbright_mips(
+    mip: &qw_common::MipTexture,
+    palette: &Palette,
+    transparent_index: Option<u8>,
+) -> Option<[Vec<u8>; 4]> {
+    let mut has_fullbright = false;
+    let mips = std::array::from_fn(|level| {
+        let mut out = Vec::with_capacity(mip.mips[level].len() * 4);
+        for &idx in &mip.mips[level] {
+            if idx >= 224 && transparent_index != Some(idx) {
+                has_fullbright = true;
+                out.extend_from_slice(&palette.rgba_for(idx, transparent_index));
+            } else {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        out
+    });
+    if has_fullbright { Some(mips) } else { None }
 }
 
 fn build_lightmap(
@@ -894,16 +941,19 @@ mod tests {
                     width: 1,
                     height: 1,
                     rgba: vec![0, 0, 0, 255],
+                    fullbright: None,
                 },
                 RenderModelTexture {
                     width: 1,
                     height: 1,
                     rgba: vec![1, 1, 1, 255],
+                    fullbright: None,
                 },
                 RenderModelTexture {
                     width: 1,
                     height: 1,
                     rgba: vec![2, 2, 2, 255],
+                    fullbright: None,
                 },
             ],
         };
@@ -949,11 +999,13 @@ mod tests {
                     width: 1,
                     height: 1,
                     rgba: vec![1, 1, 1, 255],
+                    fullbright: None,
                 },
                 RenderModelTexture {
                     width: 1,
                     height: 1,
                     rgba: vec![2, 2, 2, 255],
+                    fullbright: None,
                 },
             ],
         };
@@ -1444,6 +1496,52 @@ mod tests {
         let rgba = &world.textures[0].mips[0];
         assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
         assert_eq!(&rgba[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn builds_fullbright_mask_from_palette() {
+        let mut palette_bytes = vec![0u8; 256 * 3];
+        let idx_a = 224 * 3;
+        palette_bytes[idx_a] = 1;
+        palette_bytes[idx_a + 1] = 2;
+        palette_bytes[idx_a + 2] = 3;
+        let idx_b = 255 * 3;
+        palette_bytes[idx_b] = 9;
+        palette_bytes[idx_b + 1] = 8;
+        palette_bytes[idx_b + 2] = 7;
+        let palette = Palette::from_bytes(&palette_bytes).unwrap();
+
+        let mip = qw_common::MipTexture {
+            width: 3,
+            height: 1,
+            mips: [vec![223, 224, 255], vec![0], vec![0], vec![0]],
+        };
+        let bsp = BspRender {
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            surf_edges: Vec::new(),
+            texinfo: Vec::new(),
+            faces: Vec::new(),
+            textures: vec![qw_common::BspTexture {
+                name: "light".to_string(),
+                width: 3,
+                height: 1,
+                offsets: [0; 4],
+                mip_data: Some(mip),
+            }],
+            lighting: Vec::new(),
+            models: Vec::new(),
+        };
+
+        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
+        let fullbright = world.textures[0]
+            .fullbright
+            .as_ref()
+            .expect("expected fullbright mask");
+        let rgba = &fullbright[0];
+        assert_eq!(&rgba[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&rgba[4..8], &[1, 2, 3, 255]);
+        assert_eq!(&rgba[8..12], &[9, 8, 7, 255]);
     }
 
     #[test]
