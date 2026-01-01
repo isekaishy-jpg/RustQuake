@@ -7,6 +7,8 @@ use std::env;
 
 mod qc;
 
+const MAX_QC_STEPS: usize = 200_000;
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("[server] {err}");
@@ -41,19 +43,28 @@ fn run() -> Result<(), ServerError> {
     let func_count = vm.progs().functions.len();
     let global_count = vm.progs().globals.len();
     println!("[server] loaded {progs_name} with {func_count} functions and {global_count} globals");
-    if let Err(err) = vm.call_by_name("main", 10_000) {
-        println!("[server] qc main not executed: {err:?}");
+    if let Err(err) = vm.call_by_name("main", MAX_QC_STEPS) {
+        println!(
+            "[server] qc main not executed: {}",
+            describe_vm_error(&vm, &err)
+        );
     }
 
     if let Ok(entities) = load_map_entities(&fs, &map_name) {
         if let Err(err) = qc::apply_worldspawn(&mut vm, &entities) {
             println!("[server] qc worldspawn not applied: {err:?}");
         }
-        if let Err(err) = vm.call_by_name("worldspawn", 10_000) {
-            println!("[server] qc worldspawn not executed: {err:?}");
+        if let Err(err) = vm.call_by_name("worldspawn", MAX_QC_STEPS) {
+            println!(
+                "[server] qc worldspawn not executed: {}",
+                describe_vm_error(&vm, &err)
+            );
         }
-        if let Err(err) = qc::spawn_entities(&mut vm, &entities) {
-            println!("[server] qc entity spawn failed: {err:?}");
+        if let Err(err) = qc::spawn_entities(&mut vm, &entities, MAX_QC_STEPS) {
+            println!(
+                "[server] qc entity spawn failed: {}",
+                describe_vm_error(&vm, &err)
+            );
         }
     }
 
@@ -93,4 +104,29 @@ fn load_map_entities(fs: &QuakeFs, map_name: &str) -> Result<Vec<Entity>, Server
     let bsp = Bsp::from_bytes(bytes).map_err(ServerError::Bsp)?;
     let text = bsp.entities_text().map_err(ServerError::Bsp)?;
     parse_entities(&text).map_err(ServerError::Entities)
+}
+
+fn describe_vm_error(vm: &Vm, err: &VmError) -> String {
+    match err {
+        VmError::StepLimit {
+            statement,
+            function,
+        } => {
+            let name = vm
+                .progs()
+                .functions
+                .get(*function as usize)
+                .map(|func| func.name.as_str())
+                .unwrap_or("unknown");
+            let stmt = vm.progs().statements.get(*statement as usize).copied();
+            let op = stmt.map(|value| value.op).unwrap_or(0);
+            let (a, b, c) = stmt
+                .map(|value| (value.a, value.b, value.c))
+                .unwrap_or((0, 0, 0));
+            format!(
+                "step limit at {name} (fn {function}, statement {statement}, op {op}, a {a}, b {b}, c {c})"
+            )
+        }
+        other => format!("{other:?}"),
+    }
 }

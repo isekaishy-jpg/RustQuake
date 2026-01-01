@@ -77,7 +77,7 @@ pub fn apply_worldspawn(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError>
     Ok(())
 }
 
-pub fn spawn_entities(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
+pub fn spawn_entities(vm: &mut Vm, entities: &[Entity], max_steps: usize) -> Result<(), VmError> {
     let globals = vm
         .context_ref::<ServerQcContext>()
         .map(|ctx| ctx.globals)
@@ -99,7 +99,7 @@ pub fn spawn_entities(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
         vm.write_global_f32(self_ofs, ent as f32)?;
 
         if let Some(func) = vm.progs().function_index(classname) {
-            vm.call_function(func, 10_000)?;
+            vm.call_function(func, max_steps)?;
         } else {
             println!("[server] missing spawn function for {classname}");
         }

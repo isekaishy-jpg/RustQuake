@@ -151,7 +151,7 @@ pub enum VmError {
     BadString(i32),
     UnsupportedOpcode(u16),
     BuiltinNotRegistered(i32),
-    StepLimit,
+    StepLimit { statement: i32, function: i32 },
     StringOverflow,
 }
 
@@ -414,7 +414,15 @@ impl Vm {
         let mut steps = 0usize;
         while !self.call_stack.is_empty() {
             if steps >= max_steps {
-                return Err(VmError::StepLimit);
+                let (statement, function) = self
+                    .call_stack
+                    .last()
+                    .map(|frame| (frame.statement_index, frame.function_index as i32))
+                    .unwrap_or((0, -1));
+                return Err(VmError::StepLimit {
+                    statement,
+                    function,
+                });
             }
             steps += 1;
 
@@ -444,16 +452,16 @@ impl Vm {
                     next_statement = statement_index + statement.a as i32;
                 }
                 OP_IF => {
-                    let cond = self.read_f32(statement.a)?;
-                    if cond != 0.0 {
+                    let cond = self.read_raw(statement.a)?;
+                    if cond != 0 {
                         next_statement = statement_index + statement.b as i32;
                     } else {
                         next_statement = statement_index + 1;
                     }
                 }
                 OP_IFNOT => {
-                    let cond = self.read_f32(statement.a)?;
-                    if cond == 0.0 {
+                    let cond = self.read_raw(statement.a)?;
+                    if cond == 0 {
                         next_statement = statement_index + statement.b as i32;
                     } else {
                         next_statement = statement_index + 1;
@@ -461,10 +469,16 @@ impl Vm {
                 }
                 OP_CALL0 | OP_CALL1 | OP_CALL2 | OP_CALL3 | OP_CALL4 | OP_CALL5 | OP_CALL6
                 | OP_CALL7 | OP_CALL8 => {
-                    let func_index = statement.a as i32;
+                    let func_index = self.read_raw(statement.a)? as i32;
                     let return_statement = statement_index + 1;
+                    let stack_depth = self.call_stack.len();
                     self.call_function_index(func_index, Some(return_statement))?;
-                    update_statement = false;
+                    if self.call_stack.len() == stack_depth {
+                        next_statement = return_statement;
+                        update_statement = true;
+                    } else {
+                        update_statement = false;
+                    }
                 }
                 OP_STORE_F | OP_STORE_ENT | OP_STORE_FLD | OP_STORE_S | OP_STORE_FNC => {
                     self.copy_global(statement.a, statement.b as usize, 1)?;
@@ -473,16 +487,20 @@ impl Vm {
                     self.copy_global(statement.a, statement.b as usize, 3)?;
                 }
                 OP_STOREP_F | OP_STOREP_ENT | OP_STOREP_FLD | OP_STOREP_S | OP_STOREP_FNC => {
-                    let ptr = self.read_raw(statement.a)?;
-                    self.store_pointer(ptr, statement.b, 1)?;
+                    let ptr = self.read_raw(statement.b)?;
+                    self.store_pointer(ptr, statement.a, 1)?;
                 }
                 OP_STOREP_V => {
-                    let ptr = self.read_raw(statement.a)?;
-                    self.store_pointer(ptr, statement.b, 3)?;
+                    let ptr = self.read_raw(statement.b)?;
+                    self.store_pointer(ptr, statement.a, 3)?;
                 }
                 OP_ADDRESS => {
                     let entity = self.read_ent(statement.a)? as u32;
-                    let field = statement.b as u16;
+                    let field = self.read_raw(statement.b)? as i32;
+                    if field < 0 || field > i32::from(u16::MAX) {
+                        return Err(VmError::BadField(field));
+                    }
+                    let field = field as u16;
                     let ptr = (entity << 16) | u32::from(field);
                     self.write_raw(statement.c, ptr)?;
                 }
@@ -619,6 +637,37 @@ impl Vm {
                     };
                     self.write_i32(statement.c, result)?;
                 }
+                OP_STATE => {
+                    let Some(self_ofs) = self.progs.global_def("self").map(|def| def.offset) else {
+                        return Err(VmError::BadGlobal(-1));
+                    };
+                    let Some(time_ofs) = self.progs.global_def("time").map(|def| def.offset) else {
+                        return Err(VmError::BadGlobal(-1));
+                    };
+                    let entity = self.read_ent(self_ofs)?;
+                    let time = self.read_f32(time_ofs)?;
+                    let frame = self.read_f32(statement.a)?;
+                    let think = self.read_raw(statement.b)?;
+
+                    if let Some(def) = self.progs.field_def("nextthink") {
+                        if def.offset >= 0 {
+                            self.write_edict_field_f32(entity, def.offset as usize, time + 0.1)?;
+                        }
+                    }
+                    if let Some(def) = self.progs.field_def("frame") {
+                        if def.offset >= 0 {
+                            let current = self.read_edict_field_f32(entity, def.offset as usize)?;
+                            if current != frame {
+                                self.write_edict_field_f32(entity, def.offset as usize, frame)?;
+                            }
+                        }
+                    }
+                    if let Some(def) = self.progs.field_def("think") {
+                        if def.offset >= 0 {
+                            self.write_edict_field_raw(entity, def.offset as usize, &[think])?;
+                        }
+                    }
+                }
                 _ => return Err(VmError::UnsupportedOpcode(statement.op)),
             }
 
@@ -730,7 +779,7 @@ impl Vm {
 
     fn read_entity_field(&self, statement: Statement) -> VmResult<(usize, usize)> {
         let entity = self.read_ent(statement.a)?;
-        let field = statement.b as i32;
+        let field = self.read_raw(statement.b)? as i32;
         if field < 0 {
             return Err(VmError::BadField(field));
         }
@@ -890,7 +939,6 @@ const OP_CALL5: u16 = 56;
 const OP_CALL6: u16 = 57;
 const OP_CALL7: u16 = 58;
 const OP_CALL8: u16 = 59;
-#[allow(dead_code)]
 const OP_STATE: u16 = 60;
 const OP_GOTO: u16 = 61;
 const OP_AND: u16 = 62;
