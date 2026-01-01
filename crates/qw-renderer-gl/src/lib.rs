@@ -1,3 +1,5 @@
+#[cfg(feature = "glow")]
+use glow::HasContext;
 use qw_common::{
     AliasModel, BspRender, FaceVertex, MdlFrame, MdlSkin, Palette, Sprite, SpriteFrame,
     SpriteImage, Vec3,
@@ -35,6 +37,167 @@ impl GlDevice {
 
     pub unsafe fn viewport(&self, width: i32, height: i32) {
         self.gl.viewport(0, 0, width, height);
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlTexture {
+    id: glow::Texture,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(feature = "glow")]
+impl GlTexture {
+    unsafe fn from_rgba_mips(device: &GlDevice, texture: &GpuTexture) -> Self {
+        let gl = &device.gl;
+        let id = gl.create_texture().expect("gl texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR_MIPMAP_LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+
+        for (level, mip) in texture.mips.iter().enumerate() {
+            if mip.is_empty() {
+                continue;
+            }
+            let level_width = (texture.width >> level).max(1) as i32;
+            let level_height = (texture.height >> level).max(1) as i32;
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                level as i32,
+                glow::RGBA8 as i32,
+                level_width,
+                level_height,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                Some(mip),
+            );
+        }
+        gl.generate_mipmap(glow::TEXTURE_2D);
+
+        Self {
+            id,
+            width: texture.width,
+            height: texture.height,
+        }
+    }
+
+    unsafe fn from_lightmap(device: &GlDevice, lightmap: &GpuLightmap) -> Self {
+        let gl = &device.gl;
+        let id = gl.create_texture().expect("gl lightmap");
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::R8 as i32,
+            lightmap.width as i32,
+            lightmap.height as i32,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            Some(&lightmap.samples),
+        );
+
+        Self {
+            id,
+            width: lightmap.width,
+            height: lightmap.height,
+        }
+    }
+
+    unsafe fn update_lightmap(&mut self, device: &GlDevice, lightmap: &GpuLightmap) {
+        let gl = &device.gl;
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.id));
+        if self.width != lightmap.width || self.height != lightmap.height {
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::R8 as i32,
+                lightmap.width as i32,
+                lightmap.height as i32,
+                0,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                Some(&lightmap.samples),
+            );
+            self.width = lightmap.width;
+            self.height = lightmap.height;
+        } else {
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                lightmap.width as i32,
+                lightmap.height as i32,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(&lightmap.samples),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlWorld {
+    textures: Vec<GlTexture>,
+    lightmaps: Vec<GlTexture>,
+}
+
+#[cfg(feature = "glow")]
+impl GlWorld {
+    unsafe fn from_gpu_world(device: &GlDevice, world: &GpuWorld) -> Self {
+        let textures = world
+            .textures
+            .iter()
+            .map(|texture| GlTexture::from_rgba_mips(device, texture))
+            .collect();
+        let lightmaps = world
+            .lightmaps
+            .iter()
+            .map(|lightmap| GlTexture::from_lightmap(device, lightmap))
+            .collect();
+        Self {
+            textures,
+            lightmaps,
+        }
+    }
+
+    unsafe fn update_lightmap(&mut self, device: &GlDevice, index: usize, lightmap: &GpuLightmap) {
+        if let Some(texture) = self.lightmaps.get_mut(index) {
+            texture.update_lightmap(device, lightmap);
+        }
     }
 }
 
@@ -389,6 +552,8 @@ pub struct GlRenderer {
     models: Vec<Option<RenderModel>>,
     #[cfg(feature = "glow")]
     gl_device: Option<GlDevice>,
+    #[cfg(feature = "glow")]
+    gl_world: Option<GlWorld>,
     gpu_world: Option<GpuWorld>,
     ui: UiLayer,
 }
@@ -404,6 +569,8 @@ impl GlRenderer {
             models: Vec::new(),
             #[cfg(feature = "glow")]
             gl_device: None,
+            #[cfg(feature = "glow")]
+            gl_world: None,
             gpu_world: None,
             ui: UiLayer::default(),
         }
@@ -424,6 +591,12 @@ impl GlRenderer {
     pub fn set_world(&mut self, world: RenderWorld) {
         self.gpu_world = Some(build_gpu_world(&world));
         self.last_world = Some(world);
+        #[cfg(feature = "glow")]
+        if let (Some(device), Some(gpu_world)) = (&self.gl_device, &self.gpu_world) {
+            unsafe {
+                self.gl_world = Some(GlWorld::from_gpu_world(device, gpu_world));
+            }
+        }
     }
 
     pub fn world(&self) -> Option<&RenderWorld> {
@@ -448,6 +621,11 @@ impl GlRenderer {
         if let Some(device) = &self.gl_device {
             unsafe {
                 device.viewport(self.config.width as i32, self.config.height as i32);
+            }
+        }
+        if let (Some(device), Some(gpu_world)) = (&self.gl_device, &self.gpu_world) {
+            unsafe {
+                self.gl_world = Some(GlWorld::from_gpu_world(device, gpu_world));
             }
         }
     }
@@ -494,6 +672,10 @@ impl GlRenderer {
         let (Some(world), Some(gpu_world)) = (&self.last_world, &mut self.gpu_world) else {
             return;
         };
+        #[cfg(feature = "glow")]
+        let gl_device = self.gl_device.as_ref();
+        #[cfg(feature = "glow")]
+        let mut gl_world = self.gl_world.as_mut();
 
         for (surface_index, surface) in world.surfaces.iter().enumerate() {
             let Some(lightmap) = surface.lightmap.as_ref() else {
@@ -512,6 +694,12 @@ impl GlRenderer {
             gpu_lightmap.width = lightmap.width;
             gpu_lightmap.height = lightmap.height;
             lightmap.write_combined_samples(lightstyles, time, &mut gpu_lightmap.samples);
+            #[cfg(feature = "glow")]
+            if let (Some(device), Some(gl_world)) = (gl_device, gl_world.as_deref_mut()) {
+                unsafe {
+                    gl_world.update_lightmap(device, lightmap_index, gpu_lightmap);
+                }
+            }
         }
     }
 }
