@@ -36,6 +36,7 @@ struct QcFields {
     absmin: Option<usize>,
     absmax: Option<usize>,
     model: Option<usize>,
+    classname: Option<usize>,
 }
 
 pub fn configure_vm(vm: &mut Vm, mapname: &str) -> Result<(), VmError> {
@@ -121,6 +122,7 @@ fn resolve_fields(vm: &Vm) -> QcFields {
         absmin: field_offset(vm, "absmin"),
         absmax: field_offset(vm, "absmax"),
         model: field_offset(vm, "model"),
+        classname: field_offset(vm, "classname"),
     }
 }
 
@@ -185,6 +187,8 @@ fn register_builtins(vm: &mut Vm) {
             "setmodel" => builtin_setmodel,
             "spawn" => builtin_spawn,
             "remove" => builtin_remove,
+            "find" => builtin_find,
+            "nextent" => builtin_nextent,
             "vlen" => builtin_vlen,
             "normalize" => builtin_normalize,
             "vectoyaw" => builtin_vectoyaw,
@@ -375,6 +379,45 @@ fn builtin_remove(vm: &mut Vm) -> Result<(), VmError> {
     vm.write_edict_field_raw(ent, 0, &zeros)
 }
 
+fn builtin_find(vm: &mut Vm) -> Result<(), VmError> {
+    let start = vm.read_param_f32(0)? as i32;
+    let field = vm.read_param_raw(1)? as usize;
+    let target = read_param_string(vm, 2);
+
+    let mut index = if start < 0 { 0 } else { start + 1 } as usize;
+    while index < vm.edict_count() {
+        if let Some(value) = read_edict_string(vm, index, field) {
+            if value.eq_ignore_ascii_case(&target) {
+                return vm.set_return_f32(index as f32);
+            }
+        }
+        index += 1;
+    }
+
+    vm.set_return_f32(0.0)
+}
+
+fn builtin_nextent(vm: &mut Vm) -> Result<(), VmError> {
+    let start = vm.read_param_f32(0)? as i32;
+    let mut index = if start < 0 { 0 } else { start + 1 } as usize;
+    let fields = fields_from_context(vm);
+
+    while index < vm.edict_count() {
+        if let Some(classname_ofs) = fields.classname {
+            if let Some(value) = read_edict_string(vm, index, classname_ofs) {
+                if !value.is_empty() {
+                    return vm.set_return_f32(index as f32);
+                }
+            }
+        } else {
+            return vm.set_return_f32(index as f32);
+        }
+        index += 1;
+    }
+
+    vm.set_return_f32(0.0)
+}
+
 fn builtin_vlen(vm: &mut Vm) -> Result<(), VmError> {
     let value = vm.read_param_vec(0)?;
     let len = (value.x * value.x + value.y * value.y + value.z * value.z).sqrt();
@@ -460,6 +503,16 @@ fn fields_from_context(vm: &Vm) -> QcFields {
     vm.context_ref::<ServerQcContext>()
         .map(|ctx| ctx.fields)
         .unwrap_or_default()
+}
+
+fn read_edict_string(vm: &Vm, ent: usize, field: usize) -> Option<String> {
+    let value = vm
+        .read_edict_field_raw(ent, field, 1)
+        .ok()?
+        .first()
+        .copied()
+        .unwrap_or(0);
+    vm.progs().string_at(value as i32).ok()
 }
 
 fn update_abs_bounds(vm: &mut Vm, ent: usize, fields: QcFields) -> Result<(), VmError> {
