@@ -173,6 +173,8 @@ impl GlTexture {
 struct GlWorld {
     textures: Vec<GlTexture>,
     lightmaps: Vec<GlTexture>,
+    mesh: GlMesh,
+    draws: Vec<GlSurfaceDraw>,
 }
 
 #[cfg(feature = "glow")]
@@ -188,9 +190,12 @@ impl GlWorld {
             .iter()
             .map(|lightmap| GlTexture::from_lightmap(device, lightmap))
             .collect();
+        let (mesh, draws) = GlMesh::from_world(device, world);
         Self {
             textures,
             lightmaps,
+            mesh,
+            draws,
         }
     }
 
@@ -198,6 +203,86 @@ impl GlWorld {
         if let Some(texture) = self.lightmaps.get_mut(index) {
             texture.update_lightmap(device, lightmap);
         }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlSurfaceDraw {
+    index_offset: i32,
+    index_count: i32,
+    texture_index: Option<usize>,
+    lightmap_index: Option<usize>,
+}
+
+#[cfg(feature = "glow")]
+struct GlMesh {
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    ibo: glow::Buffer,
+}
+
+#[cfg(feature = "glow")]
+impl GlMesh {
+    unsafe fn from_world(device: &GlDevice, world: &GpuWorld) -> (Self, Vec<GlSurfaceDraw>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut draws = Vec::new();
+        let mut base_vertex = 0u32;
+
+        for surface in &world.surfaces {
+            let index_offset = indices.len() as i32;
+            let index_count = surface.indices.len() as i32;
+            indices.extend(surface.indices.iter().map(|idx| idx + base_vertex));
+            draws.push(GlSurfaceDraw {
+                index_offset,
+                index_count,
+                texture_index: surface.texture_index,
+                lightmap_index: surface.lightmap_index,
+            });
+
+            for vertex in &surface.vertices {
+                vertices.extend_from_slice(&[
+                    vertex.position.x,
+                    vertex.position.y,
+                    vertex.position.z,
+                    vertex.tex_coords[0],
+                    vertex.tex_coords[1],
+                    vertex.lightmap_coords[0],
+                    vertex.lightmap_coords[1],
+                ]);
+            }
+            base_vertex += surface.vertices.len() as u32;
+        }
+
+        let gl = &device.gl;
+        let vao = gl.create_vertex_array().expect("gl vao");
+        let vbo = gl.create_buffer().expect("gl vbo");
+        let ibo = gl.create_buffer().expect("gl ibo");
+
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        let vertex_bytes = std::slice::from_raw_parts(
+            vertices.as_ptr() as *const u8,
+            vertices.len() * std::mem::size_of::<f32>(),
+        );
+        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, vertex_bytes, glow::STATIC_DRAW);
+
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ibo));
+        let index_bytes = std::slice::from_raw_parts(
+            indices.as_ptr() as *const u8,
+            indices.len() * std::mem::size_of::<u32>(),
+        );
+        gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, index_bytes, glow::STATIC_DRAW);
+
+        let stride = (7 * std::mem::size_of::<f32>()) as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, stride, 20);
+
+        (GlMesh { vao, vbo, ibo }, draws)
     }
 }
 
