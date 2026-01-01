@@ -1,8 +1,14 @@
 #[cfg(feature = "glow")]
 use glow::HasContext;
-use qw_common::{
-    AliasModel, BspRender, FaceVertex, MdlFrame, MdlSkin, Palette, Sprite, SpriteFrame,
-    SpriteImage, Vec3,
+#[cfg(feature = "glow")]
+use qw_common::{AliasModel, MdlFrame, SpriteImage, Vec3};
+use qw_renderer::{
+    RenderDrawList, RenderEntity, RenderModel, RenderVertex, RenderView, RenderWorld, Renderer,
+    RendererConfig, ResolvedEntity, UiLayer, build_draw_list,
+};
+#[cfg(any(feature = "glow", test))]
+use qw_renderer::{
+    RenderEntityKind, RenderModelFrame, RenderModelKind, RenderModelTexture, UiText,
 };
 #[cfg(feature = "glow")]
 use std::ffi::c_void;
@@ -49,6 +55,37 @@ struct GlTexture {
 
 #[cfg(feature = "glow")]
 impl GlTexture {
+    unsafe fn from_rgba(device: &GlDevice, width: u32, height: u32, data: &[u8]) -> Self {
+        let gl = &device.gl;
+        let id = gl.create_texture().expect("gl texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            Some(data),
+        );
+
+        Self { id, width, height }
+    }
+
     unsafe fn from_rgba_mips(device: &GlDevice, texture: &GpuTexture) -> Self {
         let gl = &device.gl;
         let id = gl.create_texture().expect("gl texture");
@@ -93,10 +130,91 @@ impl GlTexture {
         }
     }
 
+    unsafe fn from_r8(device: &GlDevice, width: u32, height: u32, data: &[u8]) -> Self {
+        let gl = &device.gl;
+        let id = gl.create_texture().expect("gl lightmap");
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::LINEAR as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::R8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            Some(data),
+        );
+
+        Self { id, width, height }
+    }
+
+    unsafe fn from_r8_nearest(device: &GlDevice, width: u32, height: u32, data: &[u8]) -> Self {
+        let gl = &device.gl;
+        let id = gl.create_texture().expect("gl texture");
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::R8 as i32,
+            width as i32,
+            height as i32,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            Some(data),
+        );
+
+        Self { id, width, height }
+    }
+
     unsafe fn from_lightmap(device: &GlDevice, lightmap: &GpuLightmap) -> Self {
         let gl = &device.gl;
         let id = gl.create_texture().expect("gl lightmap");
         gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         gl.tex_parameter_i32(
             glow::TEXTURE_2D,
             glow::TEXTURE_MIN_FILTER,
@@ -139,6 +257,7 @@ impl GlTexture {
     unsafe fn update_lightmap(&mut self, device: &GlDevice, lightmap: &GpuLightmap) {
         let gl = &device.gl;
         gl.bind_texture(glow::TEXTURE_2D, Some(self.id));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
         if self.width != lightmap.width || self.height != lightmap.height {
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -167,6 +286,428 @@ impl GlTexture {
             );
         }
     }
+}
+
+#[cfg(feature = "glow")]
+struct GlProgram {
+    program: glow::Program,
+    view_proj: Option<glow::UniformLocation>,
+    model: Option<glow::UniformLocation>,
+    base_sampler: Option<glow::UniformLocation>,
+    lightmap_sampler: Option<glow::UniformLocation>,
+    debug_mode: Option<glow::UniformLocation>,
+}
+
+#[cfg(feature = "glow")]
+impl GlProgram {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vertex_source = r#"#version 330 core
+layout (location = 0) in vec3 a_pos;
+layout (location = 1) in vec2 a_uv;
+layout (location = 2) in vec2 a_light_uv;
+
+uniform mat4 u_view_proj;
+uniform mat4 u_model;
+
+out vec2 v_uv;
+out vec2 v_light_uv;
+
+void main() {
+    v_uv = a_uv;
+    v_light_uv = a_light_uv;
+    gl_Position = u_view_proj * u_model * vec4(a_pos, 1.0);
+}
+"#;
+        let fragment_source = r#"#version 330 core
+in vec2 v_uv;
+in vec2 v_light_uv;
+
+uniform sampler2D u_base_tex;
+uniform sampler2D u_lightmap_tex;
+uniform int u_debug_mode;
+
+out vec4 frag_color;
+
+void main() {
+    vec4 base = texture(u_base_tex, v_uv);
+    float light = texture(u_lightmap_tex, v_light_uv).r;
+    if (u_debug_mode == 1) {
+        frag_color = vec4(light, light, light, 1.0);
+    } else {
+        frag_color = vec4(base.rgb * light, base.a);
+    }
+}
+"#;
+
+        let vertex = compile_shader(gl, glow::VERTEX_SHADER, vertex_source);
+        let fragment = compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source);
+        let program = gl.create_program().expect("gl program");
+        gl.attach_shader(program, vertex);
+        gl.attach_shader(program, fragment);
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            panic!(
+                "gl program link failed: {}",
+                gl.get_program_info_log(program)
+            );
+        }
+        gl.detach_shader(program, vertex);
+        gl.detach_shader(program, fragment);
+        gl.delete_shader(vertex);
+        gl.delete_shader(fragment);
+
+        gl.use_program(Some(program));
+        let view_proj = gl.get_uniform_location(program, "u_view_proj");
+        let model = gl.get_uniform_location(program, "u_model");
+        let base_sampler = gl.get_uniform_location(program, "u_base_tex");
+        let lightmap_sampler = gl.get_uniform_location(program, "u_lightmap_tex");
+        let debug_mode = gl.get_uniform_location(program, "u_debug_mode");
+        if let Some(location) = base_sampler.as_ref() {
+            gl.uniform_1_i32(Some(location), 0);
+        }
+        if let Some(location) = lightmap_sampler.as_ref() {
+            gl.uniform_1_i32(Some(location), 1);
+        }
+        gl.use_program(None);
+
+        Self {
+            program,
+            view_proj,
+            model,
+            base_sampler,
+            lightmap_sampler,
+            debug_mode,
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlDynamicMesh {
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    capacity: usize,
+}
+
+#[cfg(feature = "glow")]
+impl GlDynamicMesh {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vao = gl.create_vertex_array().expect("gl vao");
+        let vbo = gl.create_buffer().expect("gl vbo");
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_size(glow::ARRAY_BUFFER, 0, glow::DYNAMIC_DRAW);
+        let stride = (7 * std::mem::size_of::<f32>()) as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 12);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_f32(2, 2, glow::FLOAT, false, stride, 20);
+        gl.bind_vertex_array(None);
+        Self {
+            vao,
+            vbo,
+            capacity: 0,
+        }
+    }
+
+    unsafe fn upload(&mut self, device: &GlDevice, vertices: &[f32]) {
+        let gl = &device.gl;
+        gl.bind_vertex_array(Some(self.vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+        let byte_len = vertices.len() * std::mem::size_of::<f32>();
+        let bytes = std::slice::from_raw_parts(vertices.as_ptr() as *const u8, byte_len);
+        if byte_len > self.capacity {
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            self.capacity = byte_len;
+        } else {
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlModel {
+    textures: Vec<GlTexture>,
+}
+
+#[cfg(feature = "glow")]
+impl GlModel {
+    unsafe fn from_render_model(device: &GlDevice, model: &RenderModel) -> Self {
+        let textures = model
+            .textures
+            .iter()
+            .map(|texture| {
+                GlTexture::from_rgba(device, texture.width, texture.height, &texture.rgba)
+            })
+            .collect();
+        Self { textures }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlUiProgram {
+    program: glow::Program,
+    projection: Option<glow::UniformLocation>,
+    color: Option<glow::UniformLocation>,
+    font_sampler: Option<glow::UniformLocation>,
+}
+
+#[cfg(feature = "glow")]
+impl GlUiProgram {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vertex_source = r#"#version 330 core
+layout (location = 0) in vec2 a_pos;
+layout (location = 1) in vec2 a_uv;
+
+uniform mat4 u_projection;
+
+out vec2 v_uv;
+
+void main() {
+    v_uv = a_uv;
+    gl_Position = u_projection * vec4(a_pos.xy, 0.0, 1.0);
+}
+"#;
+        let fragment_source = r#"#version 330 core
+in vec2 v_uv;
+
+uniform sampler2D u_font;
+uniform vec4 u_color;
+
+out vec4 frag_color;
+
+void main() {
+    float alpha = texture(u_font, v_uv).r;
+    frag_color = vec4(u_color.rgb, u_color.a * alpha);
+}
+"#;
+
+        let vertex = compile_shader(gl, glow::VERTEX_SHADER, vertex_source);
+        let fragment = compile_shader(gl, glow::FRAGMENT_SHADER, fragment_source);
+        let program = gl.create_program().expect("gl ui program");
+        gl.attach_shader(program, vertex);
+        gl.attach_shader(program, fragment);
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            panic!(
+                "gl ui program link failed: {}",
+                gl.get_program_info_log(program)
+            );
+        }
+        gl.detach_shader(program, vertex);
+        gl.detach_shader(program, fragment);
+        gl.delete_shader(vertex);
+        gl.delete_shader(fragment);
+
+        gl.use_program(Some(program));
+        let projection = gl.get_uniform_location(program, "u_projection");
+        let color = gl.get_uniform_location(program, "u_color");
+        let font_sampler = gl.get_uniform_location(program, "u_font");
+        if let Some(location) = font_sampler.as_ref() {
+            gl.uniform_1_i32(Some(location), 0);
+        }
+        gl.use_program(None);
+
+        Self {
+            program,
+            projection,
+            color,
+            font_sampler,
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlUiMesh {
+    vao: glow::VertexArray,
+    vbo: glow::Buffer,
+    capacity: usize,
+}
+
+#[cfg(feature = "glow")]
+impl GlUiMesh {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let gl = &device.gl;
+        let vao = gl.create_vertex_array().expect("gl ui vao");
+        let vbo = gl.create_buffer().expect("gl ui vbo");
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_size(glow::ARRAY_BUFFER, 0, glow::DYNAMIC_DRAW);
+        let stride = (4 * std::mem::size_of::<f32>()) as i32;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 8);
+        gl.bind_vertex_array(None);
+        Self {
+            vao,
+            vbo,
+            capacity: 0,
+        }
+    }
+
+    unsafe fn upload(&mut self, device: &GlDevice, vertices: &[f32]) {
+        let gl = &device.gl;
+        gl.bind_vertex_array(Some(self.vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+        let byte_len = vertices.len() * std::mem::size_of::<f32>();
+        let bytes = std::slice::from_raw_parts(vertices.as_ptr() as *const u8, byte_len);
+        if byte_len > self.capacity {
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
+            self.capacity = byte_len;
+        } else {
+            gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+struct GlState {
+    program: GlProgram,
+    fallback_base: GlTexture,
+    fallback_lightmap: GlTexture,
+    alias_mesh: GlDynamicMesh,
+    ui_program: GlUiProgram,
+    ui_font: GlTexture,
+    ui_mesh: GlUiMesh,
+}
+
+#[cfg(feature = "glow")]
+impl GlState {
+    unsafe fn new(device: &GlDevice) -> Self {
+        let program = GlProgram::new(device);
+        let fallback_base = GlTexture::from_rgba(device, 1, 1, &[255, 255, 255, 255]);
+        let fallback_lightmap = GlTexture::from_r8(device, 1, 1, &[255]);
+        let alias_mesh = GlDynamicMesh::new(device);
+        let ui_program = GlUiProgram::new(device);
+        let font_data = build_font_texture();
+        let ui_font =
+            GlTexture::from_r8_nearest(device, FONT_ATLAS_WIDTH, FONT_ATLAS_HEIGHT, &font_data);
+        let ui_mesh = GlUiMesh::new(device);
+        Self {
+            program,
+            fallback_base,
+            fallback_lightmap,
+            alias_mesh,
+            ui_program,
+            ui_font,
+            ui_mesh,
+        }
+    }
+}
+
+#[cfg(feature = "glow")]
+unsafe fn compile_shader(gl: &glow::Context, shader_type: u32, source: &str) -> glow::Shader {
+    let shader = gl.create_shader(shader_type).expect("gl shader");
+    gl.shader_source(shader, source);
+    gl.compile_shader(shader);
+    if !gl.get_shader_compile_status(shader) {
+        panic!(
+            "gl shader compile failed: {}",
+            gl.get_shader_info_log(shader)
+        );
+    }
+    shader
+}
+
+#[cfg(feature = "glow")]
+const FONT_CELL: u32 = 8;
+#[cfg(feature = "glow")]
+const FONT_ATLAS_COLS: u32 = 16;
+#[cfg(feature = "glow")]
+const FONT_ATLAS_ROWS: u32 = 8;
+#[cfg(feature = "glow")]
+const FONT_ATLAS_WIDTH: u32 = FONT_CELL * FONT_ATLAS_COLS;
+#[cfg(feature = "glow")]
+const FONT_ATLAS_HEIGHT: u32 = FONT_CELL * FONT_ATLAS_ROWS;
+
+#[cfg(feature = "glow")]
+const FONT8X8_BASIC: [u8; 1024] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18,
+    0x00, 0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36,
+    0x00, 0x0C, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x0C, 0x00, 0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63,
+    0x00, 0x1C, 0x36, 0x1C, 0x6E, 0x3B, 0x33, 0x6E, 0x00, 0x06, 0x06, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0x00, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06,
+    0x00, 0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x06, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C, 0x00, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x03, 0x01,
+    0x00, 0x3E, 0x63, 0x73, 0x7B, 0x6F, 0x67, 0x3E, 0x00, 0x0C, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F,
+    0x00, 0x1E, 0x33, 0x30, 0x1C, 0x06, 0x33, 0x3F, 0x00, 0x1E, 0x33, 0x30, 0x1C, 0x30, 0x33, 0x1E,
+    0x00, 0x38, 0x3C, 0x36, 0x33, 0x7F, 0x30, 0x78, 0x00, 0x3F, 0x03, 0x1F, 0x30, 0x30, 0x33, 0x1E,
+    0x00, 0x1C, 0x06, 0x03, 0x1F, 0x33, 0x33, 0x1E, 0x00, 0x3F, 0x33, 0x30, 0x18, 0x0C, 0x0C, 0x0C,
+    0x00, 0x1E, 0x33, 0x33, 0x1E, 0x33, 0x33, 0x1E, 0x00, 0x1E, 0x33, 0x33, 0x3E, 0x30, 0x18, 0x0E,
+    0x00, 0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C, 0x00, 0x00, 0x0C, 0x0C,
+    0x06, 0x18, 0x0C, 0x06, 0x03, 0x06, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x3F, 0x00,
+    0x00, 0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00, 0x1E, 0x33, 0x30, 0x18, 0x0C, 0x00, 0x0C,
+    0x00, 0x3E, 0x63, 0x7B, 0x7B, 0x7B, 0x03, 0x1E, 0x00, 0x0C, 0x1E, 0x33, 0x33, 0x3F, 0x33, 0x33,
+    0x00, 0x3F, 0x66, 0x66, 0x3E, 0x66, 0x66, 0x3F, 0x00, 0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C,
+    0x00, 0x1F, 0x36, 0x66, 0x66, 0x66, 0x36, 0x1F, 0x00, 0x7F, 0x46, 0x16, 0x1E, 0x16, 0x46, 0x7F,
+    0x00, 0x7F, 0x46, 0x16, 0x1E, 0x16, 0x06, 0x0F, 0x00, 0x3C, 0x66, 0x03, 0x03, 0x73, 0x66, 0x7C,
+    0x00, 0x33, 0x33, 0x33, 0x3F, 0x33, 0x33, 0x33, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E,
+    0x00, 0x78, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x00, 0x67, 0x66, 0x36, 0x1E, 0x36, 0x66, 0x67,
+    0x00, 0x0F, 0x06, 0x06, 0x06, 0x46, 0x66, 0x7F, 0x00, 0x63, 0x77, 0x7F, 0x7F, 0x6B, 0x63, 0x63,
+    0x00, 0x63, 0x67, 0x6F, 0x7B, 0x73, 0x63, 0x63, 0x00, 0x1C, 0x36, 0x63, 0x63, 0x63, 0x36, 0x1C,
+    0x00, 0x3F, 0x66, 0x66, 0x3E, 0x06, 0x06, 0x0F, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x3B, 0x1E, 0x38,
+    0x00, 0x3F, 0x66, 0x66, 0x3E, 0x36, 0x66, 0x67, 0x00, 0x1E, 0x33, 0x07, 0x0E, 0x38, 0x33, 0x1E,
+    0x00, 0x3F, 0x2D, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x3F,
+    0x00, 0x33, 0x33, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00, 0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63,
+    0x00, 0x63, 0x63, 0x36, 0x1C, 0x1C, 0x36, 0x63, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x0C, 0x1E,
+    0x00, 0x7F, 0x63, 0x31, 0x18, 0x4C, 0x66, 0x7F, 0x00, 0x1E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x1E,
+    0x00, 0x03, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x40, 0x00, 0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E,
+    0x00, 0x08, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0x0C, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E, 0x30, 0x3E, 0x33, 0x6E,
+    0x00, 0x07, 0x06, 0x06, 0x3E, 0x66, 0x66, 0x3B, 0x00, 0x00, 0x00, 0x1E, 0x33, 0x03, 0x33, 0x1E,
+    0x00, 0x38, 0x30, 0x30, 0x3E, 0x33, 0x33, 0x6E, 0x00, 0x00, 0x00, 0x1E, 0x33, 0x3F, 0x03, 0x1E,
+    0x00, 0x1C, 0x36, 0x06, 0x0F, 0x06, 0x06, 0x0F, 0x00, 0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30,
+    0x1F, 0x07, 0x06, 0x36, 0x6E, 0x66, 0x66, 0x67, 0x00, 0x0C, 0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x1E,
+    0x00, 0x30, 0x00, 0x30, 0x30, 0x30, 0x33, 0x33, 0x1E, 0x07, 0x06, 0x66, 0x36, 0x1E, 0x36, 0x67,
+    0x00, 0x0E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, 0x00, 0x00, 0x33, 0x7F, 0x7F, 0x6B, 0x63,
+    0x00, 0x00, 0x00, 0x1F, 0x33, 0x33, 0x33, 0x33, 0x00, 0x00, 0x00, 0x1E, 0x33, 0x33, 0x33, 0x1E,
+    0x00, 0x00, 0x00, 0x3B, 0x66, 0x66, 0x3E, 0x06, 0x0F, 0x00, 0x00, 0x6E, 0x33, 0x33, 0x3E, 0x30,
+    0x78, 0x00, 0x00, 0x3B, 0x6E, 0x66, 0x06, 0x0F, 0x00, 0x00, 0x3E, 0x03, 0x1E, 0x30, 0x1F, 0x00,
+    0x08, 0x0C, 0x3E, 0x0C, 0x0C, 0x2C, 0x18, 0x00, 0x00, 0x00, 0x33, 0x33, 0x33, 0x33, 0x6E, 0x00,
+    0x00, 0x00, 0x33, 0x33, 0x33, 0x1E, 0x0C, 0x00, 0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00,
+    0x00, 0x00, 0x63, 0x36, 0x1C, 0x36, 0x63, 0x00, 0x00, 0x00, 0x33, 0x33, 0x33, 0x3E, 0x30, 0x1F,
+    0x00, 0x00, 0x3F, 0x19, 0x0C, 0x26, 0x3F, 0x00, 0x38, 0x0C, 0x0C, 0x07, 0x0C, 0x0C, 0x38, 0x00,
+    0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, 0x07, 0x0C, 0x0C, 0x38, 0x0C, 0x0C, 0x07, 0x00,
+    0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[cfg(feature = "glow")]
+fn build_font_texture() -> Vec<u8> {
+    let mut data = vec![0u8; (FONT_ATLAS_WIDTH * FONT_ATLAS_HEIGHT) as usize];
+    for glyph in 0..128u32 {
+        let col = glyph % FONT_ATLAS_COLS;
+        let row = glyph / FONT_ATLAS_COLS;
+        for y in 0..FONT_CELL {
+            let bits = FONT8X8_BASIC[(glyph * FONT_CELL + y) as usize];
+            for x in 0..FONT_CELL {
+                let on = (bits >> x) & 1;
+                let px = col * FONT_CELL + x;
+                let py = row * FONT_CELL + y;
+                let idx = (py * FONT_ATLAS_WIDTH + px) as usize;
+                data[idx] = if on == 1 { 255 } else { 0 };
+            }
+        }
+    }
+    data
 }
 
 #[cfg(feature = "glow")]
@@ -286,213 +827,237 @@ impl GlMesh {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct RendererConfig {
-    pub width: u32,
-    pub height: u32,
-    pub vsync: bool,
+#[cfg(feature = "glow")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Mat4 {
+    data: [f32; 16],
 }
 
-impl Default for RendererConfig {
-    fn default() -> Self {
+#[cfg(feature = "glow")]
+impl Mat4 {
+    fn identity() -> Self {
         Self {
-            width: 1280,
-            height: 720,
-            vsync: true,
+            data: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
         }
     }
-}
 
-pub trait Renderer {
-    fn resize(&mut self, width: u32, height: u32);
-    fn begin_frame(&mut self);
-    fn end_frame(&mut self);
-    fn config(&self) -> RendererConfig;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RenderView {
-    pub origin: Vec3,
-    pub angles: Vec3,
-    pub fov_y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RenderVertex {
-    pub position: Vec3,
-    pub tex_coords: [f32; 2],
-    pub lightmap_coords: [f32; 2],
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderSurface {
-    pub vertices: Vec<RenderVertex>,
-    pub indices: Vec<u32>,
-    pub texture_index: Option<usize>,
-    pub texture_name: Option<String>,
-    pub lightmap: Option<RenderLightmap>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderTexture {
-    pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub mips: [Vec<u8>; 4],
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderLightmap {
-    pub width: u32,
-    pub height: u32,
-    pub styles: Vec<u8>,
-    pub samples: Vec<Vec<u8>>,
-}
-
-impl RenderLightmap {
-    pub fn combined_samples(&self, lightstyles: &[String], time: f32) -> Vec<u8> {
-        let mut out = Vec::new();
-        self.write_combined_samples(lightstyles, time, &mut out);
-        out
-    }
-
-    pub fn write_combined_samples(&self, lightstyles: &[String], time: f32, out: &mut Vec<u8>) {
-        let size = (self.width * self.height) as usize;
-        if out.len() != size {
-            out.clear();
-            out.resize(size, 0);
-        } else {
-            out.fill(0);
-        }
-
-        for (style_index, style_id) in self.styles.iter().enumerate() {
-            let scale = style_value(lightstyles, *style_id, time);
-            let samples = match self.samples.get(style_index) {
-                Some(samples) => samples,
-                None => continue,
-            };
-            for (idx, value) in samples.iter().take(size).enumerate() {
-                let sum = out[idx] as f32 + *value as f32 * scale;
-                out[idx] = sum.min(255.0).round() as u8;
+    fn mul(self, rhs: Mat4) -> Mat4 {
+        let mut out = [0.0; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                out[col * 4 + row] = self.data[0 * 4 + row] * rhs.data[col * 4 + 0]
+                    + self.data[1 * 4 + row] * rhs.data[col * 4 + 1]
+                    + self.data[2 * 4 + row] * rhs.data[col * 4 + 2]
+                    + self.data[3 * 4 + row] * rhs.data[col * 4 + 3];
             }
         }
+        Mat4 { data: out }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct LightmapBasis {
-    min_s: f32,
-    min_t: f32,
-    width: u32,
-    height: u32,
-}
+    fn perspective(fov_y_deg: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+        let fov = fov_y_deg.max(1.0).min(179.0).to_radians();
+        let f = 1.0 / (0.5 * fov).tan();
+        let nf = 1.0 / (near - far);
+        let mut out = [0.0; 16];
+        out[0] = f / aspect;
+        out[5] = f;
+        out[10] = (far + near) * nf;
+        out[11] = (2.0 * far * near) * nf;
+        out[14] = -1.0;
+        Mat4 { data: out }
+    }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderWorld {
-    pub map_name: String,
-    pub bsp: BspRender,
-    pub surfaces: Vec<RenderSurface>,
-    pub textures: Vec<RenderTexture>,
-}
+    fn orthographic(left: f32, right: f32, top: f32, bottom: f32, near: f32, far: f32) -> Mat4 {
+        let rl = right - left;
+        let tb = top - bottom;
+        let fn_range = far - near;
+        let mut out = [0.0; 16];
+        out[0] = 2.0 / rl;
+        out[5] = 2.0 / tb;
+        out[10] = -2.0 / fn_range;
+        out[12] = -(right + left) / rl;
+        out[13] = -(top + bottom) / tb;
+        out[14] = -(far + near) / fn_range;
+        out[15] = 1.0;
+        Mat4 { data: out }
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderEntityKind {
-    Brush,
-    Alias,
-    Sprite,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderEntity {
-    pub kind: RenderEntityKind,
-    pub model_index: usize,
-    pub origin: Vec3,
-    pub angles: Vec3,
-    pub frame: u32,
-    pub skin: u32,
-    pub alpha: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderDrawList {
-    pub opaque_surfaces: Vec<usize>,
-    pub transparent_surfaces: Vec<usize>,
-    pub opaque_entities: Vec<RenderEntity>,
-    pub transparent_entities: Vec<RenderEntity>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderModelTexture {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RenderModelKind {
-    Alias(AliasModel),
-    Sprite(Sprite),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RenderModel {
-    pub kind: RenderModelKind,
-    pub textures: Vec<RenderModelTexture>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RenderModelFrame<'a> {
-    Alias(&'a MdlFrame),
-    Sprite(&'a SpriteImage),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ResolvedEntity<'a> {
-    pub entity: &'a RenderEntity,
-    pub model: Option<&'a RenderModel>,
-    pub frame: Option<RenderModelFrame<'a>>,
-    pub texture_index: Option<usize>,
-}
-
-impl RenderModel {
-    pub fn frame_at_time(&self, frame: u32, time: f32) -> Option<RenderModelFrame<'_>> {
-        match &self.kind {
-            RenderModelKind::Alias(model) => model
-                .frame_at_time(frame as usize, time)
-                .map(RenderModelFrame::Alias),
-            RenderModelKind::Sprite(sprite) => sprite
-                .frame_at_time(frame as usize, time)
-                .map(RenderModelFrame::Sprite),
+    fn from_basis(right: Vec3, up: Vec3, forward: Vec3, translation: Vec3) -> Mat4 {
+        Mat4 {
+            data: [
+                right.x,
+                right.y,
+                right.z,
+                0.0,
+                up.x,
+                up.y,
+                up.z,
+                0.0,
+                forward.x,
+                forward.y,
+                forward.z,
+                0.0,
+                translation.x,
+                translation.y,
+                translation.z,
+                1.0,
+            ],
         }
     }
 
-    pub fn texture_index(&self, frame: u32, skin: u32, time: f32) -> Option<usize> {
-        if self.textures.is_empty() {
-            return None;
-        }
-        let index = match &self.kind {
-            RenderModelKind::Alias(model) => alias_skin_index(model, skin, time),
-            RenderModelKind::Sprite(sprite) => sprite_frame_index(sprite, frame, time),
-        }?;
-        if index < self.textures.len() {
-            Some(index)
-        } else {
-            None
+    fn view_from_angles(origin: Vec3, angles: Vec3) -> Mat4 {
+        let (forward, right, up) = angle_vectors(angles);
+        let neg_forward = forward.scale(-1.0);
+        Mat4 {
+            data: [
+                right.x,
+                right.y,
+                right.z,
+                -right.dot(origin),
+                up.x,
+                up.y,
+                up.z,
+                -up.dot(origin),
+                neg_forward.x,
+                neg_forward.y,
+                neg_forward.z,
+                forward.dot(origin),
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+            ],
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct UiText {
-    pub text: String,
-    pub x: i32,
-    pub y: i32,
-    pub color: [u8; 4],
+#[cfg(feature = "glow")]
+fn view_projection(view: RenderView, aspect: f32) -> Mat4 {
+    let view_mat = Mat4::view_from_angles(view.origin, view.angles);
+    let proj = Mat4::perspective(view.fov_y, aspect, 4.0, 8192.0);
+    proj.mul(view_mat)
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct UiLayer {
-    pub texts: Vec<UiText>,
+#[cfg(feature = "glow")]
+fn angle_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
+    let (pitch, yaw, roll) = (
+        angles.x.to_radians(),
+        angles.y.to_radians(),
+        angles.z.to_radians(),
+    );
+    let (sp, cp) = pitch.sin_cos();
+    let (sy, cy) = yaw.sin_cos();
+    let (sr, cr) = roll.sin_cos();
+
+    let forward = Vec3::new(cp * cy, cp * sy, -sp);
+    let right = Vec3::new(-sr * sp * cy + cr * sy, -sr * sp * sy - cr * cy, -sr * cp);
+    let up = Vec3::new(cr * sp * cy + sr * sy, cr * sp * sy - sr * cy, cr * cp);
+    (forward, right, up)
+}
+
+#[cfg(feature = "glow")]
+fn model_transform(
+    origin: Vec3,
+    angles: Vec3,
+    model_origin: Vec3,
+) -> (Mat4, Vec3, Vec3, Vec3, Vec3) {
+    let (forward, right, up) = angle_vectors(angles);
+    let rotated_origin = Vec3::new(
+        right.x * model_origin.x + up.x * model_origin.y + forward.x * model_origin.z,
+        right.y * model_origin.x + up.y * model_origin.y + forward.y * model_origin.z,
+        right.z * model_origin.x + up.z * model_origin.y + forward.z * model_origin.z,
+    );
+    let translation = Vec3::new(
+        origin.x - rotated_origin.x,
+        origin.y - rotated_origin.y,
+        origin.z - rotated_origin.z,
+    );
+    let matrix = Mat4::from_basis(right, up, forward, translation);
+    (matrix, translation, forward, right, up)
+}
+
+#[cfg(feature = "glow")]
+#[derive(Clone, Copy)]
+struct FrustumPlane {
+    normal: Vec3,
+    d: f32,
+}
+
+#[cfg(feature = "glow")]
+struct Frustum {
+    planes: [FrustumPlane; 6],
+}
+
+#[cfg(feature = "glow")]
+impl Frustum {
+    fn from_view_proj(matrix: &Mat4) -> Self {
+        let row = |r: usize| {
+            [
+                matrix.data[0 * 4 + r],
+                matrix.data[1 * 4 + r],
+                matrix.data[2 * 4 + r],
+                matrix.data[3 * 4 + r],
+            ]
+        };
+        let r0 = row(0);
+        let r1 = row(1);
+        let r2 = row(2);
+        let r3 = row(3);
+
+        let planes = [
+            plane_from_rows(r3, r0, true),
+            plane_from_rows(r3, r0, false),
+            plane_from_rows(r3, r1, true),
+            plane_from_rows(r3, r1, false),
+            plane_from_rows(r3, r2, true),
+            plane_from_rows(r3, r2, false),
+        ];
+
+        Self { planes }
+    }
+
+    fn contains_sphere(&self, center: Vec3, radius: f32) -> bool {
+        for plane in &self.planes {
+            let distance = plane.normal.dot(center) + plane.d;
+            if distance < -radius {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[cfg(feature = "glow")]
+fn plane_from_rows(row3: [f32; 4], row: [f32; 4], add: bool) -> FrustumPlane {
+    let (a, b, c, d) = if add {
+        (
+            row3[0] + row[0],
+            row3[1] + row[1],
+            row3[2] + row[2],
+            row3[3] + row[3],
+        )
+    } else {
+        (
+            row3[0] - row[0],
+            row3[1] - row[1],
+            row3[2] - row[2],
+            row3[3] - row[3],
+        )
+    };
+    let length = (a * a + b * b + c * c).sqrt();
+    if length > 0.0 {
+        FrustumPlane {
+            normal: Vec3::new(a / length, b / length, c / length),
+            d: d / length,
+        }
+    } else {
+        FrustumPlane {
+            normal: Vec3::default(),
+            d: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -522,27 +1087,6 @@ pub struct GpuWorld {
     pub textures: Vec<GpuTexture>,
     pub lightmaps: Vec<GpuLightmap>,
     pub surfaces: Vec<GpuSurface>,
-}
-
-impl RenderWorld {
-    pub fn from_bsp(map_name: impl Into<String>, bsp: BspRender) -> Self {
-        Self::from_bsp_with_palette(map_name, bsp, None)
-    }
-
-    pub fn from_bsp_with_palette(
-        map_name: impl Into<String>,
-        bsp: BspRender,
-        palette: Option<&Palette>,
-    ) -> Self {
-        let (textures, texture_map) = build_textures(&bsp, palette);
-        let surfaces = build_surfaces(&bsp, &texture_map);
-        Self {
-            map_name: map_name.into(),
-            bsp,
-            surfaces,
-            textures,
-        }
-    }
 }
 
 fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
@@ -587,46 +1131,6 @@ fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
     }
 }
 
-fn build_draw_list(world: &RenderWorld, entities: &[RenderEntity]) -> RenderDrawList {
-    let mut opaque_surfaces = Vec::new();
-    let mut transparent_surfaces = Vec::new();
-    for (index, surface) in world.surfaces.iter().enumerate() {
-        if is_transparent_surface(surface) {
-            transparent_surfaces.push(index);
-        } else {
-            opaque_surfaces.push(index);
-        }
-    }
-
-    let mut opaque_entities = Vec::new();
-    let mut transparent_entities = Vec::new();
-    for entity in entities {
-        if is_transparent_entity(entity) {
-            transparent_entities.push(entity.clone());
-        } else {
-            opaque_entities.push(entity.clone());
-        }
-    }
-
-    RenderDrawList {
-        opaque_surfaces,
-        transparent_surfaces,
-        opaque_entities,
-        transparent_entities,
-    }
-}
-
-fn is_transparent_surface(surface: &RenderSurface) -> bool {
-    surface
-        .texture_name
-        .as_deref()
-        .is_some_and(|name| name.starts_with('{'))
-}
-
-fn is_transparent_entity(entity: &RenderEntity) -> bool {
-    entity.alpha < 1.0 || matches!(entity.kind, RenderEntityKind::Sprite)
-}
-
 #[derive(Debug, Clone)]
 pub struct GlRenderer {
     config: RendererConfig,
@@ -639,8 +1143,14 @@ pub struct GlRenderer {
     gl_device: Option<GlDevice>,
     #[cfg(feature = "glow")]
     gl_world: Option<GlWorld>,
+    #[cfg(feature = "glow")]
+    gl_state: Option<GlState>,
+    #[cfg(feature = "glow")]
+    gl_models: Vec<Option<GlModel>>,
     gpu_world: Option<GpuWorld>,
     ui: UiLayer,
+    debug_wireframe: bool,
+    debug_lightmap: bool,
 }
 
 impl GlRenderer {
@@ -656,8 +1166,14 @@ impl GlRenderer {
             gl_device: None,
             #[cfg(feature = "glow")]
             gl_world: None,
+            #[cfg(feature = "glow")]
+            gl_state: None,
+            #[cfg(feature = "glow")]
+            gl_models: Vec::new(),
             gpu_world: None,
             ui: UiLayer::default(),
+            debug_wireframe: false,
+            debug_lightmap: false,
         }
     }
 
@@ -694,6 +1210,10 @@ impl GlRenderer {
 
     pub fn set_models(&mut self, models: Vec<Option<RenderModel>>) {
         self.models = models;
+        #[cfg(feature = "glow")]
+        if self.gl_device.is_some() {
+            self.rebuild_gl_models();
+        }
     }
 
     pub fn models(&self) -> &[Option<RenderModel>] {
@@ -708,11 +1228,34 @@ impl GlRenderer {
                 device.viewport(self.config.width as i32, self.config.height as i32);
             }
         }
+        if let Some(device) = &self.gl_device {
+            unsafe {
+                self.gl_state = Some(GlState::new(device));
+            }
+        }
         if let (Some(device), Some(gpu_world)) = (&self.gl_device, &self.gpu_world) {
             unsafe {
                 self.gl_world = Some(GlWorld::from_gpu_world(device, gpu_world));
             }
         }
+        self.rebuild_gl_models();
+    }
+
+    #[cfg(feature = "glow")]
+    fn rebuild_gl_models(&mut self) {
+        let Some(device) = self.gl_device.as_ref() else {
+            self.gl_models.clear();
+            return;
+        };
+        self.gl_models = self
+            .models
+            .iter()
+            .map(|model| {
+                model
+                    .as_ref()
+                    .map(|model| unsafe { GlModel::from_render_model(device, model) })
+            })
+            .collect();
     }
 
     pub fn resolved_entities(&self, time: f32) -> Vec<ResolvedEntity<'_>> {
@@ -747,6 +1290,14 @@ impl GlRenderer {
 
     pub fn ui(&self) -> &UiLayer {
         &self.ui
+    }
+
+    pub fn set_wireframe(&mut self, enabled: bool) {
+        self.debug_wireframe = enabled;
+    }
+
+    pub fn set_lightmap_debug(&mut self, enabled: bool) {
+        self.debug_lightmap = enabled;
     }
 
     pub fn gpu_world(&self) -> Option<&GpuWorld> {
@@ -787,6 +1338,435 @@ impl GlRenderer {
             }
         }
     }
+
+    #[cfg(feature = "glow")]
+    fn draw_world(&mut self) {
+        let Some(draw_list) = self.draw_list() else {
+            return;
+        };
+        let (Some(device), Some(gl_state), Some(gl_world), Some(view), Some(world)) = (
+            self.gl_device.as_ref(),
+            self.gl_state.as_mut(),
+            self.gl_world.as_ref(),
+            self.last_view,
+            self.last_world.as_ref(),
+        ) else {
+            return;
+        };
+
+        let aspect = self.config.width as f32 / self.config.height as f32;
+        let view_proj = view_projection(view, aspect);
+        let frustum = Frustum::from_view_proj(&view_proj);
+        let model_identity = Mat4::identity();
+        let gl = &device.gl;
+        let time = self.frame_index as f32 * (1.0 / 60.0);
+        unsafe {
+            gl.use_program(Some(gl_state.program.program));
+            if let Some(location) = gl_state.program.view_proj.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &view_proj.data);
+            }
+            if let Some(location) = gl_state.program.model.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
+            }
+            let debug_mode = if self.debug_lightmap { 1 } else { 0 };
+            if let Some(location) = gl_state.program.debug_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), debug_mode);
+            }
+            if self.debug_wireframe {
+                gl.polygon_mode(glow::FRONT_AND_BACK, glow::LINE);
+            } else {
+                gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
+            }
+
+            gl.bind_vertex_array(Some(gl_world.mesh.vao));
+
+            let mut draw_surface = |surface_index: usize| {
+                if let Some(surface) = world.surfaces.get(surface_index) {
+                    if !frustum.contains_sphere(surface.bounds.center, surface.bounds.radius) {
+                        return;
+                    }
+                }
+                let Some(draw) = gl_world.draws.get(surface_index) else {
+                    return;
+                };
+                if draw.index_count <= 0 {
+                    return;
+                }
+                let base = draw
+                    .texture_index
+                    .and_then(|index| gl_world.textures.get(index))
+                    .unwrap_or(&gl_state.fallback_base);
+                let lightmap = draw
+                    .lightmap_index
+                    .and_then(|index| gl_world.lightmaps.get(index))
+                    .unwrap_or(&gl_state.fallback_lightmap);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(lightmap.id));
+                let offset_bytes = draw.index_offset * std::mem::size_of::<u32>() as i32;
+                gl.draw_elements(
+                    glow::TRIANGLES,
+                    draw.index_count,
+                    glow::UNSIGNED_INT,
+                    offset_bytes,
+                );
+            };
+
+            gl.disable(glow::BLEND);
+            gl.depth_mask(true);
+            for &surface_index in &draw_list.opaque_surfaces {
+                draw_surface(surface_index);
+            }
+            self.draw_brush_entities(
+                device,
+                gl_state,
+                &self.entities,
+                world,
+                gl_world,
+                &frustum,
+                false,
+            );
+            if let Some(location) = gl_state.program.model.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
+            }
+            if let Some(location) = gl_state.program.debug_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
+            self.draw_alias_entities(device, gl_state, &draw_list.opaque_entities, &frustum, time);
+            self.draw_sprite_entities(
+                device,
+                gl_state,
+                &draw_list.opaque_entities,
+                view,
+                &frustum,
+                time,
+            );
+
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.depth_mask(false);
+            if let Some(location) = gl_state.program.debug_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), debug_mode);
+            }
+            gl.bind_vertex_array(Some(gl_world.mesh.vao));
+            for &surface_index in &draw_list.transparent_surfaces {
+                draw_surface(surface_index);
+            }
+            self.draw_brush_entities(
+                device,
+                gl_state,
+                &self.entities,
+                world,
+                gl_world,
+                &frustum,
+                true,
+            );
+            if let Some(location) = gl_state.program.model.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
+            }
+            if let Some(location) = gl_state.program.debug_mode.as_ref() {
+                gl.uniform_1_i32(Some(location), 0);
+            }
+            self.draw_alias_entities(
+                device,
+                gl_state,
+                &draw_list.transparent_entities,
+                &frustum,
+                time,
+            );
+            self.draw_sprite_entities(
+                device,
+                gl_state,
+                &draw_list.transparent_entities,
+                view,
+                &frustum,
+                time,
+            );
+            gl.depth_mask(true);
+            if self.debug_wireframe {
+                gl.polygon_mode(glow::FRONT_AND_BACK, glow::FILL);
+            }
+            self.draw_ui(device, gl_state);
+
+            gl.bind_vertex_array(None);
+            gl.use_program(None);
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_brush_entities(
+        &self,
+        device: &GlDevice,
+        gl_state: &mut GlState,
+        entities: &[RenderEntity],
+        world: &RenderWorld,
+        gl_world: &GlWorld,
+        frustum: &Frustum,
+        transparent: bool,
+    ) {
+        let gl = &device.gl;
+        for entity in entities {
+            if entity.kind != RenderEntityKind::Brush {
+                continue;
+            }
+            if entity.model_index == 0 {
+                continue;
+            }
+            let brush_index = entity.model_index.saturating_sub(1);
+            if brush_index == 0 {
+                continue;
+            }
+            let Some(brush_model) = world.brush_models.get(brush_index) else {
+                continue;
+            };
+            if brush_model.surfaces.is_empty() {
+                continue;
+            }
+            let (model_matrix, translation, forward, right, up) =
+                model_transform(entity.origin, entity.angles, brush_model.origin);
+            let center = brush_model.bounds.center;
+            let world_center = Vec3::new(
+                translation.x + right.x * center.x + up.x * center.y + forward.x * center.z,
+                translation.y + right.y * center.x + up.y * center.y + forward.y * center.z,
+                translation.z + right.z * center.x + up.z * center.y + forward.z * center.z,
+            );
+            if !frustum.contains_sphere(world_center, brush_model.bounds.radius) {
+                continue;
+            }
+            if let Some(location) = gl_state.program.model.as_ref() {
+                unsafe {
+                    gl.uniform_matrix_4_f32_slice(Some(location), false, &model_matrix.data);
+                }
+            }
+            let entity_transparent = entity.alpha < 1.0;
+            for &surface_index in &brush_model.surfaces {
+                let Some(surface) = world.surfaces.get(surface_index) else {
+                    continue;
+                };
+                let surface_transparent = surface
+                    .texture_name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with('{'));
+                if entity_transparent {
+                    if !transparent {
+                        continue;
+                    }
+                } else if surface_transparent != transparent {
+                    continue;
+                }
+                let Some(draw) = gl_world.draws.get(surface_index) else {
+                    continue;
+                };
+                if draw.index_count <= 0 {
+                    continue;
+                }
+                let base = draw
+                    .texture_index
+                    .and_then(|index| gl_world.textures.get(index))
+                    .unwrap_or(&gl_state.fallback_base);
+                let lightmap = draw
+                    .lightmap_index
+                    .and_then(|index| gl_world.lightmaps.get(index))
+                    .unwrap_or(&gl_state.fallback_lightmap);
+                unsafe {
+                    gl.active_texture(glow::TEXTURE0);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(lightmap.id));
+                    let offset_bytes = draw.index_offset * std::mem::size_of::<u32>() as i32;
+                    gl.draw_elements(
+                        glow::TRIANGLES,
+                        draw.index_count,
+                        glow::UNSIGNED_INT,
+                        offset_bytes,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_alias_entities(
+        &self,
+        device: &GlDevice,
+        gl_state: &mut GlState,
+        entities: &[RenderEntity],
+        frustum: &Frustum,
+        time: f32,
+    ) {
+        let gl = &device.gl;
+        unsafe {
+            gl.disable(glow::CULL_FACE);
+        }
+        for entity in entities {
+            if entity.kind != RenderEntityKind::Alias {
+                continue;
+            }
+            let Some(model) = self
+                .models
+                .get(entity.model_index)
+                .and_then(|entry| entry.as_ref())
+            else {
+                continue;
+            };
+            let Some(frame) = model.frame_at_time(entity.frame, time) else {
+                continue;
+            };
+            let RenderModelFrame::Alias(frame) = frame else {
+                continue;
+            };
+            let RenderModelKind::Alias(alias_model) = &model.kind else {
+                continue;
+            };
+            if !frustum.contains_sphere(entity.origin, alias_model.header.bounding_radius) {
+                continue;
+            }
+            let texture_index = model.texture_index(entity.frame, entity.skin, time);
+            let gl_model = self
+                .gl_models
+                .get(entity.model_index)
+                .and_then(|entry| entry.as_ref());
+            let base = texture_index
+                .and_then(|index| gl_model.and_then(|model| model.textures.get(index)))
+                .unwrap_or(&gl_state.fallback_base);
+
+            let vertices = build_alias_vertices(alias_model, frame, entity);
+            if vertices.is_empty() {
+                continue;
+            }
+            unsafe {
+                gl_state.alias_mesh.upload(device, &vertices);
+                gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(gl_state.fallback_lightmap.id));
+                gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 7) as i32);
+            }
+        }
+        unsafe {
+            gl.enable(glow::CULL_FACE);
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_sprite_entities(
+        &self,
+        device: &GlDevice,
+        gl_state: &mut GlState,
+        entities: &[RenderEntity],
+        view: RenderView,
+        frustum: &Frustum,
+        time: f32,
+    ) {
+        let gl = &device.gl;
+        let (_, view_right, view_up) = angle_vectors(view.angles);
+        unsafe {
+            gl.disable(glow::CULL_FACE);
+        }
+        for entity in entities {
+            if entity.kind != RenderEntityKind::Sprite {
+                continue;
+            }
+            let Some(model) = self
+                .models
+                .get(entity.model_index)
+                .and_then(|entry| entry.as_ref())
+            else {
+                continue;
+            };
+            let Some(frame) = model.frame_at_time(entity.frame, time) else {
+                continue;
+            };
+            let RenderModelFrame::Sprite(image) = frame else {
+                continue;
+            };
+            let radius = 0.5 * image.width.max(image.height) as f32;
+            if !frustum.contains_sphere(entity.origin, radius) {
+                continue;
+            }
+            let texture_index = model.texture_index(entity.frame, entity.skin, time);
+            let gl_model = self
+                .gl_models
+                .get(entity.model_index)
+                .and_then(|entry| entry.as_ref());
+            let base = texture_index
+                .and_then(|index| gl_model.and_then(|model| model.textures.get(index)))
+                .unwrap_or(&gl_state.fallback_base);
+
+            let vertices = build_sprite_vertices(entity, image, view_right, view_up);
+            if vertices.is_empty() {
+                continue;
+            }
+            unsafe {
+                gl_state.alias_mesh.upload(device, &vertices);
+                gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(base.id));
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(gl_state.fallback_lightmap.id));
+                gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 7) as i32);
+            }
+        }
+        unsafe {
+            gl.enable(glow::CULL_FACE);
+        }
+    }
+
+    #[cfg(feature = "glow")]
+    fn draw_ui(&self, device: &GlDevice, gl_state: &mut GlState) {
+        if self.ui.texts.is_empty() {
+            return;
+        }
+        let gl = &device.gl;
+        let projection = Mat4::orthographic(
+            0.0,
+            self.config.width as f32,
+            0.0,
+            self.config.height as f32,
+            -1.0,
+            1.0,
+        );
+        unsafe {
+            gl.use_program(Some(gl_state.ui_program.program));
+            if let Some(location) = gl_state.ui_program.projection.as_ref() {
+                gl.uniform_matrix_4_f32_slice(Some(location), false, &projection.data);
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(gl_state.ui_font.id));
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.disable(glow::DEPTH_TEST);
+            gl.bind_vertex_array(Some(gl_state.ui_mesh.vao));
+        }
+
+        for text in &self.ui.texts {
+            let vertices = build_ui_vertices(text);
+            if vertices.is_empty() {
+                continue;
+            }
+            let color = [
+                text.color[0] as f32 / 255.0,
+                text.color[1] as f32 / 255.0,
+                text.color[2] as f32 / 255.0,
+                text.color[3] as f32 / 255.0,
+            ];
+            unsafe {
+                if let Some(location) = gl_state.ui_program.color.as_ref() {
+                    gl.uniform_4_f32(Some(location), color[0], color[1], color[2], color[3]);
+                }
+                gl_state.ui_mesh.upload(device, &vertices);
+                gl.draw_arrays(glow::TRIANGLES, 0, (vertices.len() / 4) as i32);
+            }
+        }
+
+        unsafe {
+            gl.bind_vertex_array(None);
+            gl.enable(glow::DEPTH_TEST);
+            gl.use_program(None);
+        }
+    }
 }
 
 impl Renderer for GlRenderer {
@@ -812,331 +1792,141 @@ impl Renderer for GlRenderer {
         }
     }
 
-    fn end_frame(&mut self) {}
+    fn end_frame(&mut self) {
+        #[cfg(feature = "glow")]
+        self.draw_world();
+    }
 
     fn config(&self) -> RendererConfig {
         self.config
     }
 }
 
-fn build_surfaces(bsp: &BspRender, texture_map: &[Option<usize>]) -> Vec<RenderSurface> {
-    let mut surfaces = Vec::new();
-    for (index, face) in bsp.faces.iter().enumerate() {
-        let verts = match bsp.face_vertices(index) {
-            Some(verts) if verts.len() >= 3 => verts,
-            _ => continue,
-        };
-        let tex_scale = texture_scale_for_face(bsp, face);
-        let lightmap_basis = lightmap_basis(&verts);
-        let lightmap = build_lightmap(bsp, face, lightmap_basis.as_ref());
-        let lightmap_basis = if lightmap.is_some() {
-            lightmap_basis
-        } else {
-            None
-        };
-        let vertices = verts
-            .into_iter()
-            .map(|vertex| RenderVertex {
-                position: vertex.position,
-                tex_coords: if let Some((width, height)) = tex_scale {
-                    [vertex.tex_coords[0] / width, vertex.tex_coords[1] / height]
-                } else {
-                    vertex.tex_coords
-                },
-                lightmap_coords: if let Some(basis) = lightmap_basis {
-                    [
-                        (vertex.tex_coords[0] - basis.min_s) / 16.0,
-                        (vertex.tex_coords[1] - basis.min_t) / 16.0,
-                    ]
-                } else {
-                    [0.0, 0.0]
-                },
-            })
-            .collect::<Vec<_>>();
-
-        let texture_name = texture_name_for_face(bsp, face);
-        let texture_index = texture_index_for_face(bsp, face, texture_map);
-        let indices = triangulate_fan(vertices.len());
-        surfaces.push(RenderSurface {
-            vertices,
-            indices,
-            texture_index,
-            texture_name,
-            lightmap,
-        });
-    }
-    surfaces
-}
-
-fn triangulate_fan(vertex_count: usize) -> Vec<u32> {
-    if vertex_count < 3 {
+#[cfg(feature = "glow")]
+fn build_alias_vertices(model: &AliasModel, frame: &MdlFrame, entity: &RenderEntity) -> Vec<f32> {
+    let width = model.header.skin_width as f32;
+    let height = model.header.skin_height as f32;
+    if width <= 0.0 || height <= 0.0 {
         return Vec::new();
     }
-
-    let mut indices = Vec::with_capacity((vertex_count - 2) * 3);
-    for i in 1..(vertex_count - 1) {
-        indices.push(0);
-        indices.push(i as u32);
-        indices.push((i + 1) as u32);
+    let mut vertices = Vec::with_capacity(model.triangles.len() * 3 * 7);
+    for triangle in &model.triangles {
+        for &index in &triangle.indices {
+            let idx = index as usize;
+            let Some(vertex) = frame.vertices.get(idx) else {
+                continue;
+            };
+            let Some(tex_coord) = model.tex_coords.get(idx) else {
+                continue;
+            };
+            let mut s = tex_coord.s as f32;
+            if !triangle.faces_front && tex_coord.on_seam {
+                s += width * 0.5;
+            }
+            let u = s / width;
+            let v = tex_coord.t as f32 / height;
+            let pos = transform_alias_vertex(vertex.position, entity.origin, entity.angles);
+            vertices.extend_from_slice(&[pos.x, pos.y, pos.z, u, v, 0.0, 0.0]);
+        }
     }
-    indices
+    vertices
 }
 
-fn build_textures(
-    bsp: &BspRender,
-    palette: Option<&Palette>,
-) -> (Vec<RenderTexture>, Vec<Option<usize>>) {
-    let mut texture_map = vec![None; bsp.textures.len()];
-    let Some(palette) = palette else {
-        return (Vec::new(), texture_map);
+#[cfg(feature = "glow")]
+fn transform_alias_vertex(position: Vec3, origin: Vec3, angles: Vec3) -> Vec3 {
+    let (forward, right, up) = angle_vectors(angles);
+    Vec3::new(
+        origin.x + forward.x * position.x + right.x * position.y + up.x * position.z,
+        origin.y + forward.y * position.x + right.y * position.y + up.y * position.z,
+        origin.z + forward.z * position.x + right.z * position.y + up.z * position.z,
+    )
+}
+
+#[cfg(feature = "glow")]
+fn build_sprite_vertices(
+    entity: &RenderEntity,
+    image: &SpriteImage,
+    view_right: Vec3,
+    view_up: Vec3,
+) -> Vec<f32> {
+    let width = image.width as f32;
+    let height = image.height as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return Vec::new();
+    }
+    let left = -(image.origin.0 as f32);
+    let top = -(image.origin.1 as f32);
+    let right = left + width;
+    let bottom = top + height;
+
+    let make_point = |x: f32, y: f32| {
+        Vec3::new(
+            entity.origin.x + view_right.x * x + view_up.x * y,
+            entity.origin.y + view_right.y * x + view_up.y * y,
+            entity.origin.z + view_right.z * x + view_up.z * y,
+        )
     };
 
-    let mut textures = Vec::new();
-    for (index, texture) in bsp.textures.iter().enumerate() {
-        let Some(mip) = texture.mip_data.as_ref() else {
+    let p0 = make_point(left, top);
+    let p1 = make_point(right, top);
+    let p2 = make_point(right, bottom);
+    let p3 = make_point(left, bottom);
+
+    let mut vertices = Vec::with_capacity(6 * 7);
+    vertices.extend_from_slice(&[p0.x, p0.y, p0.z, 0.0, 0.0, 0.0, 0.0]);
+    vertices.extend_from_slice(&[p1.x, p1.y, p1.z, 1.0, 0.0, 0.0, 0.0]);
+    vertices.extend_from_slice(&[p2.x, p2.y, p2.z, 1.0, 1.0, 0.0, 0.0]);
+    vertices.extend_from_slice(&[p0.x, p0.y, p0.z, 0.0, 0.0, 0.0, 0.0]);
+    vertices.extend_from_slice(&[p2.x, p2.y, p2.z, 1.0, 1.0, 0.0, 0.0]);
+    vertices.extend_from_slice(&[p3.x, p3.y, p3.z, 0.0, 1.0, 0.0, 0.0]);
+    vertices
+}
+
+#[cfg(feature = "glow")]
+fn build_ui_vertices(text: &UiText) -> Vec<f32> {
+    let cell = FONT_CELL as f32;
+    let atlas_w = FONT_ATLAS_WIDTH as f32;
+    let atlas_h = FONT_ATLAS_HEIGHT as f32;
+    let mut vertices = Vec::with_capacity(text.text.len() * 6 * 4);
+    let mut cursor_x = text.x as f32;
+    let mut cursor_y = text.y as f32;
+
+    for ch in text.text.bytes() {
+        if ch == b'\n' {
+            cursor_x = text.x as f32;
+            cursor_y += cell;
             continue;
-        };
-        if texture.name.is_empty() {
-            continue;
         }
+        let glyph = if ch < 128 { ch } else { b'?' } as u32;
+        let col = glyph % FONT_ATLAS_COLS;
+        let row = glyph / FONT_ATLAS_COLS;
+        let u0 = (col * FONT_CELL) as f32 / atlas_w;
+        let v0 = (row * FONT_CELL) as f32 / atlas_h;
+        let u1 = ((col + 1) * FONT_CELL) as f32 / atlas_w;
+        let v1 = ((row + 1) * FONT_CELL) as f32 / atlas_h;
 
-        let transparent_index = if texture.name.starts_with('{') {
-            Some(255)
-        } else {
-            None
-        };
-        let mips = std::array::from_fn(|level| {
-            palette.expand_indices(&mip.mips[level], transparent_index)
-        });
-        textures.push(RenderTexture {
-            name: texture.name.clone(),
-            width: mip.width,
-            height: mip.height,
-            mips,
-        });
-        texture_map[index] = Some(textures.len() - 1);
-    }
+        let x0 = cursor_x;
+        let y0 = cursor_y;
+        let x1 = cursor_x + cell;
+        let y1 = cursor_y + cell;
 
-    (textures, texture_map)
-}
+        vertices.extend_from_slice(&[x0, y0, u0, v0]);
+        vertices.extend_from_slice(&[x1, y0, u1, v0]);
+        vertices.extend_from_slice(&[x1, y1, u1, v1]);
+        vertices.extend_from_slice(&[x0, y0, u0, v0]);
+        vertices.extend_from_slice(&[x1, y1, u1, v1]);
+        vertices.extend_from_slice(&[x0, y1, u0, v1]);
 
-fn texture_name_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<String> {
-    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
-    if texinfo.texture_id < 0 {
-        return None;
-    }
-    let index = texinfo.texture_id as usize;
-    let texture = bsp.textures.get(index)?;
-    if texture.name.is_empty() {
-        None
-    } else {
-        Some(texture.name.clone())
-    }
-}
-
-fn texture_index_for_face(
-    bsp: &BspRender,
-    face: &qw_common::Face,
-    texture_map: &[Option<usize>],
-) -> Option<usize> {
-    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
-    if texinfo.texture_id < 0 {
-        return None;
-    }
-    let index = texinfo.texture_id as usize;
-    texture_map.get(index).and_then(|slot| *slot)
-}
-
-fn texture_scale_for_face(bsp: &BspRender, face: &qw_common::Face) -> Option<(f32, f32)> {
-    let texinfo = bsp.texinfo.get(face.texinfo as usize)?;
-    if texinfo.texture_id < 0 {
-        return None;
-    }
-    let texture = bsp.textures.get(texinfo.texture_id as usize)?;
-    if texture.width == 0 || texture.height == 0 {
-        return None;
-    }
-    Some((texture.width as f32, texture.height as f32))
-}
-
-fn build_lightmap(
-    bsp: &BspRender,
-    face: &qw_common::Face,
-    basis: Option<&LightmapBasis>,
-) -> Option<RenderLightmap> {
-    if face.light_ofs < 0 {
-        return None;
-    }
-    if bsp.lighting.is_empty() {
-        return None;
+        cursor_x += cell;
     }
 
-    let basis = basis?;
-    let (width, height) = (basis.width, basis.height);
-    let size = (width * height) as usize;
-    if size == 0 {
-        return None;
-    }
-
-    let styles: Vec<u8> = face
-        .styles
-        .iter()
-        .copied()
-        .filter(|style| *style != 255)
-        .collect();
-    if styles.is_empty() {
-        return None;
-    }
-
-    let offset = face.light_ofs as usize;
-    let total = size
-        .checked_mul(styles.len())
-        .and_then(|count| offset.checked_add(count))?;
-    if total > bsp.lighting.len() {
-        return None;
-    }
-
-    let mut samples = Vec::with_capacity(styles.len());
-    for idx in 0..styles.len() {
-        let start = offset + idx * size;
-        let end = start + size;
-        samples.push(bsp.lighting[start..end].to_vec());
-    }
-
-    Some(RenderLightmap {
-        width,
-        height,
-        styles,
-        samples,
-    })
-}
-
-fn lightmap_basis(verts: &[FaceVertex]) -> Option<LightmapBasis> {
-    let first = verts.first()?;
-    let mut min_s = first.tex_coords[0];
-    let mut max_s = first.tex_coords[0];
-    let mut min_t = first.tex_coords[1];
-    let mut max_t = first.tex_coords[1];
-
-    for vert in verts.iter().skip(1) {
-        min_s = min_s.min(vert.tex_coords[0]);
-        max_s = max_s.max(vert.tex_coords[0]);
-        min_t = min_t.min(vert.tex_coords[1]);
-        max_t = max_t.max(vert.tex_coords[1]);
-    }
-
-    let min_s = (min_s / 16.0).floor() * 16.0;
-    let max_s = (max_s / 16.0).ceil() * 16.0;
-    let min_t = (min_t / 16.0).floor() * 16.0;
-    let max_t = (max_t / 16.0).ceil() * 16.0;
-
-    let extent_s = max_s - min_s;
-    let extent_t = max_t - min_t;
-    if extent_s < 0.0 || extent_t < 0.0 {
-        return None;
-    }
-
-    let width = (extent_s / 16.0).round() as i32 + 1;
-    let height = (extent_t / 16.0).round() as i32 + 1;
-    if width <= 0 || height <= 0 {
-        return None;
-    }
-
-    Some(LightmapBasis {
-        min_s,
-        min_t,
-        width: width as u32,
-        height: height as u32,
-    })
-}
-
-fn style_value(lightstyles: &[String], style_id: u8, time: f32) -> f32 {
-    let style = lightstyles
-        .get(style_id as usize)
-        .map(|value| value.as_str())
-        .unwrap_or("");
-    if style.is_empty() {
-        return 1.0;
-    }
-    let index = ((time * 10.0) as usize) % style.len();
-    let byte = style.as_bytes()[index];
-    if byte < b'a' {
-        return 1.0;
-    }
-    (byte.saturating_sub(b'a') as f32) / 25.0
-}
-
-fn alias_skin_index(model: &AliasModel, skin: u32, time: f32) -> Option<usize> {
-    let target = skin as usize;
-    let mut offset = 0usize;
-    for (idx, entry) in model.skins.iter().enumerate() {
-        if idx == target {
-            let index = match entry {
-                MdlSkin::Single { .. } => 0,
-                MdlSkin::Group {
-                    intervals, frames, ..
-                } => group_frame_index(intervals, frames.len(), time),
-            };
-            return Some(offset + index);
-        }
-        offset += match entry {
-            MdlSkin::Single { .. } => 1,
-            MdlSkin::Group { frames, .. } => frames.len(),
-        };
-    }
-    None
-}
-
-fn sprite_frame_index(sprite: &Sprite, frame: u32, time: f32) -> Option<usize> {
-    let target = frame as usize;
-    let mut offset = 0usize;
-    for (idx, entry) in sprite.frames.iter().enumerate() {
-        if idx == target {
-            let index = match entry {
-                SpriteFrame::Single(_) => 0,
-                SpriteFrame::Group { intervals, frames } => {
-                    group_frame_index(intervals, frames.len(), time)
-                }
-            };
-            return Some(offset + index);
-        }
-        offset += match entry {
-            SpriteFrame::Single(_) => 1,
-            SpriteFrame::Group { frames, .. } => frames.len(),
-        };
-    }
-    None
-}
-
-fn group_frame_index(intervals: &[f32], frame_count: usize, time: f32) -> usize {
-    if frame_count == 0 {
-        return 0;
-    }
-    let count = intervals.len().min(frame_count);
-    if count == 0 {
-        return 0;
-    }
-    let total: f32 = intervals.iter().take(count).sum();
-    if total <= 0.0 {
-        return 0;
-    }
-    let mut t = time % total;
-    if t < 0.0 {
-        t += total;
-    }
-    for (idx, interval) in intervals.iter().take(count).enumerate() {
-        if t < *interval {
-            return idx;
-        }
-        t -= *interval;
-    }
-    0
+    vertices
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qw_common::{SpriteFrame, SpriteHeader, SpriteImage};
+    use qw_common::{BspRender, Sprite, SpriteFrame, SpriteHeader, SpriteImage, Vec3};
 
     #[test]
     fn resizes_to_nonzero_dimensions() {
@@ -1180,6 +1970,7 @@ mod tests {
                 faces: Vec::new(),
                 textures: Vec::new(),
                 lighting: Vec::new(),
+                models: Vec::new(),
             },
         );
         renderer.set_world(world.clone());
@@ -1211,48 +2002,6 @@ mod tests {
         })];
         renderer.set_models(models.clone());
         assert_eq!(renderer.models(), &models);
-    }
-
-    #[test]
-    fn resolves_sprite_group_frame_by_time() {
-        let frame_a = SpriteImage {
-            width: 1,
-            height: 1,
-            origin: (0, 0),
-            pixels: vec![1],
-        };
-        let frame_b = SpriteImage {
-            width: 1,
-            height: 1,
-            origin: (0, 0),
-            pixels: vec![2],
-        };
-        let sprite = Sprite {
-            header: SpriteHeader {
-                sprite_type: 0,
-                bounding_radius: 0.0,
-                width: 1,
-                height: 1,
-                num_frames: 1,
-                beam_length: 0.0,
-                sync_type: 0,
-            },
-            frames: vec![SpriteFrame::Group {
-                intervals: vec![0.1, 0.2],
-                frames: vec![frame_a, frame_b],
-            }],
-        };
-        let model = RenderModel {
-            kind: RenderModelKind::Sprite(sprite),
-            textures: Vec::new(),
-        };
-        let frame = model.frame_at_time(0, 0.15).unwrap();
-        match frame {
-            RenderModelFrame::Sprite(image) => {
-                assert_eq!(image.pixels[0], 2);
-            }
-            _ => panic!("expected sprite frame"),
-        }
     }
 
     #[test]
@@ -1308,114 +2057,6 @@ mod tests {
     }
 
     #[test]
-    fn selects_alias_skin_texture_index() {
-        let header = qw_common::MdlHeader {
-            scale: Vec3::default(),
-            translate: Vec3::default(),
-            bounding_radius: 0.0,
-            eye_position: Vec3::default(),
-            num_skins: 2,
-            skin_width: 1,
-            skin_height: 1,
-            num_verts: 0,
-            num_tris: 0,
-            num_frames: 0,
-            sync_type: 0,
-            flags: 0,
-            size: 0.0,
-        };
-        let model = RenderModel {
-            kind: RenderModelKind::Alias(AliasModel {
-                header,
-                skins: vec![
-                    MdlSkin::Single {
-                        width: 1,
-                        height: 1,
-                        indices: vec![0],
-                    },
-                    MdlSkin::Group {
-                        width: 1,
-                        height: 1,
-                        intervals: vec![0.1, 0.2],
-                        frames: vec![vec![1], vec![2]],
-                    },
-                ],
-                triangles: Vec::new(),
-                frames: Vec::new(),
-            }),
-            textures: vec![
-                RenderModelTexture {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![0, 0, 0, 255],
-                },
-                RenderModelTexture {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![1, 1, 1, 255],
-                },
-                RenderModelTexture {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![2, 2, 2, 255],
-                },
-            ],
-        };
-
-        assert_eq!(model.texture_index(0, 0, 0.0), Some(0));
-        assert_eq!(model.texture_index(0, 1, 0.15), Some(2));
-    }
-
-    #[test]
-    fn selects_sprite_texture_index() {
-        let sprite = Sprite {
-            header: SpriteHeader {
-                sprite_type: 0,
-                bounding_radius: 0.0,
-                width: 1,
-                height: 1,
-                num_frames: 1,
-                beam_length: 0.0,
-                sync_type: 0,
-            },
-            frames: vec![SpriteFrame::Group {
-                intervals: vec![0.1, 0.2],
-                frames: vec![
-                    SpriteImage {
-                        width: 1,
-                        height: 1,
-                        origin: (0, 0),
-                        pixels: vec![1],
-                    },
-                    SpriteImage {
-                        width: 1,
-                        height: 1,
-                        origin: (0, 0),
-                        pixels: vec![2],
-                    },
-                ],
-            }],
-        };
-        let model = RenderModel {
-            kind: RenderModelKind::Sprite(sprite),
-            textures: vec![
-                RenderModelTexture {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![1, 1, 1, 255],
-                },
-                RenderModelTexture {
-                    width: 1,
-                    height: 1,
-                    rgba: vec![2, 2, 2, 255],
-                },
-            ],
-        };
-
-        assert_eq!(model.texture_index(0, 0, 0.15), Some(1));
-    }
-
-    #[test]
     fn stores_ui_state() {
         let mut renderer = GlRenderer::new(RendererConfig::default());
         let ui = UiLayer {
@@ -1430,124 +2071,6 @@ mod tests {
         assert_eq!(renderer.ui(), &ui);
     }
 
-    #[test]
-    fn builds_draw_list_with_transparent_surfaces() {
-        let bsp = BspRender {
-            vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
-            surf_edges: vec![0, 1, 2, 3],
-            texinfo: vec![
-                qw_common::TexInfo {
-                    s_vec: Vec3::new(1.0, 0.0, 0.0),
-                    s_offset: 0.0,
-                    t_vec: Vec3::new(0.0, 1.0, 0.0),
-                    t_offset: 0.0,
-                    texture_id: 0,
-                    flags: 0,
-                },
-                qw_common::TexInfo {
-                    s_vec: Vec3::new(1.0, 0.0, 0.0),
-                    s_offset: 0.0,
-                    t_vec: Vec3::new(0.0, 1.0, 0.0),
-                    t_offset: 0.0,
-                    texture_id: 1,
-                    flags: 0,
-                },
-            ],
-            faces: vec![
-                qw_common::Face {
-                    plane_num: 0,
-                    side: 0,
-                    first_edge: 0,
-                    num_edges: 4,
-                    texinfo: 0,
-                    styles: [255; 4],
-                    light_ofs: -1,
-                },
-                qw_common::Face {
-                    plane_num: 0,
-                    side: 0,
-                    first_edge: 0,
-                    num_edges: 4,
-                    texinfo: 1,
-                    styles: [255; 4],
-                    light_ofs: -1,
-                },
-            ],
-            textures: vec![
-                qw_common::BspTexture {
-                    name: "wall".to_string(),
-                    width: 64,
-                    height: 64,
-                    offsets: [0; 4],
-                    mip_data: None,
-                },
-                qw_common::BspTexture {
-                    name: "{water".to_string(),
-                    width: 64,
-                    height: 64,
-                    offsets: [0; 4],
-                    mip_data: None,
-                },
-            ],
-            lighting: Vec::new(),
-        };
-
-        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
-        let mut renderer = GlRenderer::new(RendererConfig::default());
-        renderer.set_world(world);
-        let draw_list = renderer.draw_list().unwrap();
-        assert_eq!(draw_list.opaque_surfaces, vec![0]);
-        assert_eq!(draw_list.transparent_surfaces, vec![1]);
-    }
-
-    #[test]
-    fn builds_draw_list_with_transparent_entities() {
-        let mut renderer = GlRenderer::new(RendererConfig::default());
-        renderer.set_entities(vec![
-            RenderEntity {
-                kind: RenderEntityKind::Alias,
-                model_index: 1,
-                origin: Vec3::default(),
-                angles: Vec3::default(),
-                frame: 0,
-                skin: 0,
-                alpha: 1.0,
-            },
-            RenderEntity {
-                kind: RenderEntityKind::Sprite,
-                model_index: 2,
-                origin: Vec3::default(),
-                angles: Vec3::default(),
-                frame: 0,
-                skin: 0,
-                alpha: 1.0,
-            },
-        ]);
-
-        let world = RenderWorld::from_bsp(
-            "maps/start.bsp",
-            BspRender {
-                vertices: Vec::new(),
-                edges: Vec::new(),
-                surf_edges: Vec::new(),
-                texinfo: Vec::new(),
-                faces: Vec::new(),
-                textures: Vec::new(),
-                lighting: Vec::new(),
-            },
-        );
-        renderer.set_world(world);
-        let draw_list = renderer.draw_list().unwrap();
-        assert_eq!(draw_list.opaque_entities.len(), 1);
-        assert_eq!(draw_list.transparent_entities.len(), 1);
-        assert_eq!(draw_list.transparent_entities[0].model_index, 2);
-    }
     #[test]
     fn builds_gpu_world_lightmaps() {
         let mut lighting = Vec::new();
@@ -1587,6 +2110,7 @@ mod tests {
                 mip_data: None,
             }],
             lighting,
+            models: Vec::new(),
         };
 
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
@@ -1637,6 +2161,7 @@ mod tests {
                 mip_data: None,
             }],
             lighting,
+            models: Vec::new(),
         };
 
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
@@ -1649,246 +2174,5 @@ mod tests {
 
         let gpu_world = renderer.gpu_world().unwrap();
         assert_eq!(gpu_world.lightmaps[0].samples[0], 4);
-    }
-
-    #[test]
-    fn builds_surfaces_from_faces() {
-        let bsp = BspRender {
-            vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
-            surf_edges: vec![0, 1, 2, 3],
-            texinfo: vec![qw_common::TexInfo {
-                s_vec: Vec3::new(1.0, 0.0, 0.0),
-                s_offset: 0.0,
-                t_vec: Vec3::new(0.0, 1.0, 0.0),
-                t_offset: 0.0,
-                texture_id: 0,
-                flags: 0,
-            }],
-            faces: vec![qw_common::Face {
-                plane_num: 0,
-                side: 0,
-                first_edge: 0,
-                num_edges: 4,
-                texinfo: 0,
-                styles: [0; 4],
-                light_ofs: 0,
-            }],
-            textures: vec![qw_common::BspTexture {
-                name: "wall".to_string(),
-                width: 64,
-                height: 64,
-                offsets: [0; 4],
-                mip_data: None,
-            }],
-            lighting: Vec::new(),
-        };
-
-        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
-        assert_eq!(world.surfaces.len(), 1);
-        assert_eq!(world.surfaces[0].vertices.len(), 4);
-        assert_eq!(world.surfaces[0].indices, vec![0, 1, 2, 0, 2, 3]);
-        assert_eq!(world.surfaces[0].texture_index, None);
-        assert_eq!(world.surfaces[0].vertices[1].tex_coords, [1.0 / 64.0, 0.0]);
-        assert_eq!(world.surfaces[0].vertices[1].lightmap_coords, [0.0, 0.0]);
-        assert_eq!(world.surfaces[0].texture_name.as_deref(), Some("wall"));
-        assert!(world.surfaces[0].lightmap.is_none());
-    }
-
-    #[test]
-    fn assigns_texture_indices_from_mips() {
-        let mut palette_bytes = vec![0u8; 256 * 3];
-        palette_bytes[0] = 10;
-        palette_bytes[1] = 20;
-        palette_bytes[2] = 30;
-        let palette = Palette::from_bytes(&palette_bytes).unwrap();
-
-        let mip = qw_common::MipTexture {
-            width: 2,
-            height: 2,
-            mips: [vec![0; 4], vec![0], vec![0], vec![0]],
-        };
-        let bsp = BspRender {
-            vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.0),
-            ],
-            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
-            surf_edges: vec![0, 1, 2, 3],
-            texinfo: vec![qw_common::TexInfo {
-                s_vec: Vec3::new(1.0, 0.0, 0.0),
-                s_offset: 0.0,
-                t_vec: Vec3::new(0.0, 1.0, 0.0),
-                t_offset: 0.0,
-                texture_id: 0,
-                flags: 0,
-            }],
-            faces: vec![qw_common::Face {
-                plane_num: 0,
-                side: 0,
-                first_edge: 0,
-                num_edges: 4,
-                texinfo: 0,
-                styles: [0; 4],
-                light_ofs: 0,
-            }],
-            textures: vec![qw_common::BspTexture {
-                name: "wall".to_string(),
-                width: 2,
-                height: 2,
-                offsets: [0; 4],
-                mip_data: Some(mip),
-            }],
-            lighting: Vec::new(),
-        };
-
-        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
-        assert_eq!(world.textures.len(), 1);
-        assert_eq!(world.surfaces[0].texture_index, Some(0));
-    }
-
-    #[test]
-    fn builds_lightmap_from_face() {
-        let mut lighting = Vec::new();
-        lighting.extend_from_slice(&[1u8; 9]);
-
-        let bsp = BspRender {
-            vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(32.0, 0.0, 0.0),
-                Vec3::new(32.0, 32.0, 0.0),
-                Vec3::new(0.0, 32.0, 0.0),
-            ],
-            edges: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
-            surf_edges: vec![0, 1, 2, 3],
-            texinfo: vec![qw_common::TexInfo {
-                s_vec: Vec3::new(1.0, 0.0, 0.0),
-                s_offset: 0.0,
-                t_vec: Vec3::new(0.0, 1.0, 0.0),
-                t_offset: 0.0,
-                texture_id: 0,
-                flags: 0,
-            }],
-            faces: vec![qw_common::Face {
-                plane_num: 0,
-                side: 0,
-                first_edge: 0,
-                num_edges: 4,
-                texinfo: 0,
-                styles: [0, 255, 255, 255],
-                light_ofs: 0,
-            }],
-            textures: vec![qw_common::BspTexture {
-                name: "wall".to_string(),
-                width: 32,
-                height: 32,
-                offsets: [0; 4],
-                mip_data: None,
-            }],
-            lighting,
-        };
-
-        let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
-        let lightmap = world.surfaces[0].lightmap.as_ref().unwrap();
-        assert_eq!(world.surfaces[0].vertices[1].lightmap_coords, [2.0, 0.0]);
-        assert_eq!(lightmap.width, 3);
-        assert_eq!(lightmap.height, 3);
-        assert_eq!(lightmap.styles, vec![0]);
-        assert_eq!(lightmap.samples[0].len(), 9);
-        assert_eq!(lightmap.samples[0][0], 1);
-    }
-
-    #[test]
-    fn combines_lightmap_styles() {
-        let lightmap = RenderLightmap {
-            width: 1,
-            height: 1,
-            styles: vec![0],
-            samples: vec![vec![50]],
-        };
-        let mut styles = vec![String::new(); 1];
-        styles[0] = "z".to_string();
-        let combined = lightmap.combined_samples(&styles, 0.0);
-        assert_eq!(combined, vec![50]);
-    }
-
-    #[test]
-    fn builds_textures_from_palette() {
-        let mut palette_bytes = vec![0u8; 256 * 3];
-        palette_bytes[0] = 10;
-        palette_bytes[1] = 20;
-        palette_bytes[2] = 30;
-        let palette = Palette::from_bytes(&palette_bytes).unwrap();
-
-        let mip = qw_common::MipTexture {
-            width: 1,
-            height: 1,
-            mips: [vec![0], vec![0], vec![0], vec![0]],
-        };
-        let bsp = BspRender {
-            vertices: Vec::new(),
-            edges: Vec::new(),
-            surf_edges: Vec::new(),
-            texinfo: Vec::new(),
-            faces: Vec::new(),
-            textures: vec![qw_common::BspTexture {
-                name: "brick".to_string(),
-                width: 1,
-                height: 1,
-                offsets: [0; 4],
-                mip_data: Some(mip),
-            }],
-            lighting: Vec::new(),
-        };
-
-        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
-        assert_eq!(world.textures.len(), 1);
-        assert_eq!(world.textures[0].mips[0], vec![10, 20, 30, 255]);
-    }
-
-    #[test]
-    fn applies_transparent_index_for_brace_textures() {
-        let mut palette_bytes = vec![0u8; 256 * 3];
-        palette_bytes[0] = 10;
-        palette_bytes[1] = 20;
-        palette_bytes[2] = 30;
-        let base = 255 * 3;
-        palette_bytes[base] = 40;
-        palette_bytes[base + 1] = 50;
-        palette_bytes[base + 2] = 60;
-        let palette = Palette::from_bytes(&palette_bytes).unwrap();
-
-        let mip = qw_common::MipTexture {
-            width: 2,
-            height: 2,
-            mips: [vec![0, 255, 0, 255], vec![0], vec![0], vec![0]],
-        };
-        let bsp = BspRender {
-            vertices: Vec::new(),
-            edges: Vec::new(),
-            surf_edges: Vec::new(),
-            texinfo: Vec::new(),
-            faces: Vec::new(),
-            textures: vec![qw_common::BspTexture {
-                name: "{water".to_string(),
-                width: 2,
-                height: 2,
-                offsets: [0; 4],
-                mip_data: Some(mip),
-            }],
-            lighting: Vec::new(),
-        };
-
-        let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
-        let rgba = &world.textures[0].mips[0];
-        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
-        assert_eq!(&rgba[4..8], &[0, 0, 0, 0]);
     }
 }

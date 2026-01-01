@@ -318,7 +318,7 @@ fn parse_leaf_contents(data: &[u8]) -> Result<Vec<i32>, BspError> {
     Ok(contents)
 }
 
-fn parse_models(data: &[u8]) -> Result<Vec<BspModel>, BspError> {
+pub(crate) fn parse_models(data: &[u8]) -> Result<Vec<BspModel>, BspError> {
     if !data.len().is_multiple_of(DMODEL_SIZE) {
         return Err(BspError::InvalidLump);
     }

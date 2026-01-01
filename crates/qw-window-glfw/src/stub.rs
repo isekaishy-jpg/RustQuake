@@ -1,4 +1,5 @@
 use crate::{WindowConfig, WindowEvent};
+use std::ffi::c_void;
 
 #[derive(Debug)]
 pub struct GlfwWindow {
@@ -42,5 +43,11 @@ impl GlfwWindow {
 
     pub fn config(&self) -> &WindowConfig {
         &self.config
+    }
+
+    pub fn swap_buffers(&mut self) {}
+
+    pub fn get_proc_address(&self, _symbol: &str) -> *const c_void {
+        std::ptr::null()
     }
 }

@@ -87,6 +87,14 @@ impl GlfwWindow {
     pub fn config(&self) -> &WindowConfig {
         &self.config
     }
+
+    pub fn swap_buffers(&mut self) {
+        self.window.swap_buffers();
+    }
+
+    pub fn get_proc_address(&self, symbol: &str) -> *const std::ffi::c_void {
+        self.window.get_proc_address(symbol)
+    }
 }
 
 fn map_event(event: glfw::WindowEvent) -> Option<WindowEvent> {

@@ -765,6 +765,7 @@ version = "0.1.0"
 dependencies = [
  "qw-audio",
  "qw-common",
+ "qw-renderer",
  "qw-renderer-gl",
  "qw-window-glfw",
 ]
@@ -774,11 +775,19 @@ name = "qw-common"
 version = "0.1.0"
 
 [[package]]
+name = "qw-renderer"
+version = "0.1.0"
+dependencies = [
+ "qw-common",
+]
+
+[[package]]
 name = "qw-renderer-gl"
 version = "0.1.0"
 dependencies = [
  "glow",
  "qw-common",
+ "qw-renderer",
 ]
 
 [[package]]

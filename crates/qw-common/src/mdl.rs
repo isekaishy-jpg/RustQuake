@@ -37,6 +37,7 @@ pub struct MdlHeader {
 pub struct AliasModel {
     pub header: MdlHeader,
     pub skins: Vec<MdlSkin>,
+    pub tex_coords: Vec<MdlTexCoord>,
     pub triangles: Vec<MdlTriangle>,
     pub frames: Vec<MdlFrameGroup>,
 }
@@ -60,6 +61,13 @@ pub enum MdlSkin {
 pub struct MdlTriangle {
     pub faces_front: bool,
     pub indices: [u16; 3],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MdlTexCoord {
+    pub on_seam: bool,
+    pub s: i32,
+    pub t: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,12 +135,14 @@ impl AliasModel {
         };
 
         let skins = parse_skins(&mut cursor, &header)?;
+        let tex_coords = parse_tex_coords(&mut cursor, header.num_verts)?;
         let triangles = parse_triangles(&mut cursor, header.num_tris)?;
         let frames = parse_frames(&mut cursor, &header)?;
 
         Ok(AliasModel {
             header,
             skins,
+            tex_coords,
             triangles,
             frames,
         })
@@ -228,6 +238,17 @@ fn parse_skins(cursor: &mut Cursor<'_>, header: &MdlHeader) -> Result<Vec<MdlSki
         }
     }
     Ok(skins)
+}
+
+fn parse_tex_coords(cursor: &mut Cursor<'_>, count: u32) -> Result<Vec<MdlTexCoord>, MdlError> {
+    let mut coords = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let on_seam = cursor.read_i32()? != 0;
+        let s = cursor.read_i32()?;
+        let t = cursor.read_i32()?;
+        coords.push(MdlTexCoord { on_seam, s, t });
+    }
+    Ok(coords)
 }
 
 fn parse_triangles(cursor: &mut Cursor<'_>, count: u32) -> Result<Vec<MdlTriangle>, MdlError> {
@@ -416,6 +437,16 @@ mod tests {
         push_i32(&mut data, 0);
         data.push(0);
 
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 1);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 0);
+        push_i32(&mut data, 1);
+
         push_i32(&mut data, 1);
         push_i32(&mut data, 0);
         push_i32(&mut data, 1);
@@ -440,6 +471,15 @@ mod tests {
         let model = AliasModel::from_bytes(&bytes).unwrap();
         assert_eq!(model.header.num_verts, 3);
         assert_eq!(model.skins.len(), 1);
+        assert_eq!(model.tex_coords.len(), 3);
+        assert_eq!(
+            model.tex_coords[1],
+            MdlTexCoord {
+                on_seam: false,
+                s: 1,
+                t: 0,
+            }
+        );
         assert_eq!(model.triangles.len(), 1);
         match &model.frames[0] {
             MdlFrameGroup::Single(frame) => {

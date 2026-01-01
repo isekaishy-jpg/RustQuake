@@ -1,8 +1,8 @@
 // Render-oriented BSP lump parsing for QuakeWorld maps.
 
 use crate::bsp::{
-    Bsp, BspError, LUMP_EDGES, LUMP_FACES, LUMP_LIGHTING, LUMP_SURFEDGES, LUMP_TEXINFO,
-    LUMP_TEXTURES, LUMP_VERTEXES,
+    Bsp, BspError, BspModel, LUMP_EDGES, LUMP_FACES, LUMP_LIGHTING, LUMP_MODELS, LUMP_SURFEDGES,
+    LUMP_TEXINFO, LUMP_TEXTURES, LUMP_VERTEXES, parse_models,
 };
 use crate::types::Vec3;
 
@@ -58,6 +58,7 @@ pub struct BspRender {
     pub faces: Vec<Face>,
     pub textures: Vec<BspTexture>,
     pub lighting: Vec<u8>,
+    pub models: Vec<BspModel>,
 }
 
 impl BspRender {
@@ -70,6 +71,7 @@ impl BspRender {
             faces: parse_faces(bsp.lump_slice(LUMP_FACES)?)?,
             textures: parse_textures(bsp.lump_slice(LUMP_TEXTURES)?)?,
             lighting: bsp.lump_slice(LUMP_LIGHTING)?.to_vec(),
+            models: parse_models(bsp.lump_slice(LUMP_MODELS)?)?,
         })
     }
 
@@ -441,6 +443,7 @@ mod tests {
             }],
             textures: Vec::new(),
             lighting: Vec::new(),
+            models: Vec::new(),
         };
 
         let verts = render.face_vertices(0).unwrap();

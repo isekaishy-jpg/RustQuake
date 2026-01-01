@@ -28,10 +28,13 @@ use qw_audio::{AudioConfig, AudioSystem};
 use qw_common::{
     InfoError, InfoString, STAT_AMMO, STAT_ARMOR, STAT_HEALTH, UPDATE_MASK, value_for_key,
 };
-use qw_renderer_gl::{
-    GlRenderer, RenderEntity, RenderEntityKind, RenderModel, RenderModelKind, RenderModelTexture,
-    RenderView, RenderWorld, Renderer, RendererConfig, UiLayer, UiText,
+use qw_renderer::{
+    RenderEntity, RenderEntityKind, RenderModel, RenderModelKind, RenderModelTexture, RenderView,
+    RenderWorld, Renderer, RendererConfig, UiLayer, UiText,
 };
+#[cfg(feature = "glow")]
+use qw_renderer_gl::GlDevice;
+use qw_renderer_gl::GlRenderer;
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
@@ -92,6 +95,11 @@ fn run() -> Result<(), AppError> {
         height,
         ..RendererConfig::default()
     });
+    #[cfg(feature = "glow")]
+    {
+        let device = unsafe { GlDevice::from_loader(|name| window.get_proc_address(name)) };
+        renderer.set_device(device);
+    }
     let mut audio = AudioSystem::new(AudioConfig::default());
     let mut sound_manager = SoundManager::new();
 
@@ -242,6 +250,7 @@ fn run() -> Result<(), AppError> {
             renderer.update_lightmaps(&runner.state.lightstyles, runner.state.server_time);
             renderer.begin_frame();
             renderer.end_frame();
+            window.swap_buffers();
         }
 
         std::thread::sleep(Duration::from_millis(1));
@@ -757,6 +766,7 @@ mod tests {
             faces: Vec::new(),
             textures: Vec::new(),
             lighting: Vec::new(),
+            models: Vec::new(),
         });
 
         let mut last_world = None;

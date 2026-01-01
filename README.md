@@ -30,6 +30,24 @@ While running, you can type console commands into stdin (e.g. `name`, `skin`,
 Mode selection: `--mode qw` (default) for QuakeWorld, or `--mode sp` for
 singleplayer (singleplayer runtime is pending).
 
+## Renderer features
+The OpenGL path is feature-gated and disabled by default.
+
+- `qw-client` feature `glow`: enables the GLFW window backend and `glow`-based
+  OpenGL renderer.
+- Without `glow`, the window and renderer use stub backends that keep the build
+  and tests headless.
+
+Example:
+```bash
+cargo run -p qw-client --features glow -- --connect 127.0.0.1:27500
+```
+
+Runtime toggles are currently programmatic:
+- `GlRenderer::set_wireframe(true)` switches the world to wireframe rendering.
+- `GlRenderer::set_lightmap_debug(true)` draws lightmaps instead of textured
+  surfaces.
+
 ## Upstream
 See docs/upstream.md for the exact upstream commit.
 
