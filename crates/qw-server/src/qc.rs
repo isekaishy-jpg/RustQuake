@@ -67,6 +67,37 @@ pub fn apply_worldspawn(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError>
     Ok(())
 }
 
+pub fn spawn_entities(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
+    let globals = vm
+        .context_ref::<ServerQcContext>()
+        .map(|ctx| ctx.globals)
+        .unwrap_or_default();
+    let Some(self_ofs) = globals.self_ofs else {
+        return Ok(());
+    };
+
+    for entity in entities {
+        let Some(classname) = entity.get("classname") else {
+            continue;
+        };
+        if classname.eq_ignore_ascii_case("worldspawn") {
+            continue;
+        }
+
+        let ent = vm.alloc_edict();
+        apply_entity_pairs(vm, ent, entity)?;
+        vm.write_global_f32(self_ofs, ent as f32)?;
+
+        if let Some(func) = vm.progs().function_index(classname) {
+            vm.call_function(func, 10_000)?;
+        } else {
+            println!("[server] missing spawn function for {classname}");
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_globals(vm: &Vm) -> QcGlobals {
     QcGlobals {
         self_ofs: global_offset(vm, "self"),

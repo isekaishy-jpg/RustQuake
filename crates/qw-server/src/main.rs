@@ -52,6 +52,9 @@ fn run() -> Result<(), ServerError> {
         if let Err(err) = vm.call_by_name("worldspawn", 10_000) {
             println!("[server] qc worldspawn not executed: {err:?}");
         }
+        if let Err(err) = qc::spawn_entities(&mut vm, &entities) {
+            println!("[server] qc entity spawn failed: {err:?}");
+        }
     }
 
     Ok(())
