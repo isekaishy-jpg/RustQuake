@@ -1,9 +1,10 @@
 use qw_common::{
-    A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityError,
-    EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError, OobMessage,
-    PORT_SERVER, PROTOCOL_VERSION, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf,
-    StringListChunk, SvcMessage, UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir,
-    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, write_svc_message,
+    A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityDelta,
+    EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError,
+    OobMessage, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs,
+    S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf, StringListChunk, SvcMessage, UserCmd, Vec3,
+    build_out_of_band, find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload,
+    parse_entities, parse_oob_message, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -30,6 +31,8 @@ struct ServerInfo {
 struct ServerWorld {
     static_entities: Vec<EntityState>,
     static_sounds: Vec<StaticSoundInfo>,
+    player_baseline: EntityState,
+    player_info: PlayerInfoMessage,
 }
 
 #[derive(Clone)]
@@ -45,6 +48,7 @@ struct ClientState {
     signon: u8,
     last_heard: Instant,
     userinfo: String,
+    last_frame: Instant,
 }
 
 impl ClientState {
@@ -54,8 +58,21 @@ impl ClientState {
             signon: 0,
             last_heard: Instant::now(),
             userinfo,
+            last_frame: Instant::now(),
         }
     }
+}
+
+struct ServerContext {
+    info: ServerInfo,
+    world: ServerWorld,
+    start: Instant,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SpawnPoint {
+    origin: Vec3,
+    angles: Vec3,
 }
 
 fn main() {
@@ -99,8 +116,9 @@ fn run() -> Result<(), ServerError> {
         );
     }
 
-    if let Ok(entities) = load_map_entities(&fs, &map_name) {
-        if let Err(err) = qc::apply_worldspawn(&mut vm, &entities) {
+    let map_entities = load_map_entities(&fs, &map_name).ok();
+    if let Some(entities) = map_entities.as_ref() {
+        if let Err(err) = qc::apply_worldspawn(&mut vm, entities) {
             println!("[server] qc worldspawn not applied: {err:?}");
         }
         if let Err(err) = vm.call_by_name("worldspawn", MAX_QC_STEPS) {
@@ -109,7 +127,7 @@ fn run() -> Result<(), ServerError> {
                 describe_vm_error(&vm, &err)
             );
         }
-        if let Err(err) = qc::spawn_entities(&mut vm, &entities, MAX_QC_STEPS) {
+        if let Err(err) = qc::spawn_entities(&mut vm, entities, MAX_QC_STEPS) {
             println!(
                 "[server] qc entity spawn failed: {}",
                 describe_vm_error(&vm, &err)
@@ -125,7 +143,11 @@ fn run() -> Result<(), ServerError> {
 
     let qc_snapshot = qc::snapshot(&vm);
     let server_info = build_server_info(&game_name, &map_name, qc_snapshot.clone());
-    let server_world = build_world_snapshot(&vm, &server_info, &qc_snapshot);
+    let spawn_point = map_entities
+        .as_ref()
+        .map(|entities| find_spawn_point(entities))
+        .unwrap_or_default();
+    let server_world = build_world_snapshot(&vm, &server_info, &qc_snapshot, spawn_point);
     run_network(server_info, server_world)?;
 
     Ok(())
@@ -226,6 +248,7 @@ fn build_world_snapshot(
     vm: &Vm,
     server_info: &ServerInfo,
     snapshot: &qc::ServerQcSnapshot,
+    spawn: SpawnPoint,
 ) -> ServerWorld {
     let mut static_entities = Vec::new();
     for ent in &snapshot.static_entities {
@@ -256,6 +279,8 @@ fn build_world_snapshot(
     ServerWorld {
         static_entities,
         static_sounds,
+        player_baseline: build_player_baseline(spawn, server_info),
+        player_info: build_player_info(spawn),
     }
 }
 
@@ -274,6 +299,49 @@ fn clamp_u8(value: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
+fn build_player_baseline(spawn: SpawnPoint, server_info: &ServerInfo) -> EntityState {
+    let model_index = model_index_for("progs/player.mdl", &server_info.model_list);
+    EntityState {
+        number: 1,
+        flags: 0,
+        origin: spawn.origin,
+        angles: spawn.angles,
+        modelindex: model_index as i32,
+        frame: 0,
+        colormap: 0,
+        skinnum: 0,
+        effects: 0,
+    }
+}
+
+fn build_player_info(spawn: SpawnPoint) -> PlayerInfoMessage {
+    PlayerInfoMessage {
+        num: 0,
+        flags: 0,
+        origin: spawn.origin,
+        frame: 0,
+        msec: None,
+        command: None,
+        velocity: [0; 3],
+        model_index: None,
+        skin_num: None,
+        effects: None,
+        weapon_frame: None,
+    }
+}
+
+fn model_index_for(name: &str, model_list: &[String]) -> u8 {
+    for (index, entry) in model_list.iter().enumerate() {
+        if index > u8::MAX as usize {
+            break;
+        }
+        if entry.eq_ignore_ascii_case(name) {
+            return index as u8;
+        }
+    }
+    0
+}
+
 fn run_network(server_info: ServerInfo, server_world: ServerWorld) -> Result<(), ServerError> {
     let bind_addr = format!("0.0.0.0:{PORT_SERVER}");
     let socket = UdpSocket::bind(&bind_addr).map_err(ServerError::Net)?;
@@ -282,11 +350,15 @@ fn run_network(server_info: ServerInfo, server_world: ServerWorld) -> Result<(),
         .map_err(ServerError::Net)?;
     println!("[server] listening on {bind_addr}");
 
+    let context = ServerContext {
+        info: server_info,
+        world: server_world,
+        start: Instant::now(),
+    };
     let mut rng_state = 0x1234_5678u32;
     let mut challenges: HashMap<SocketAddr, i32> = HashMap::new();
     let mut clients: HashMap<SocketAddr, ClientState> = HashMap::new();
     let run_once = env::var("RUSTQUAKE_RUN_ONCE").is_ok();
-    let start = Instant::now();
     let mut buf = [0u8; 1400];
 
     loop {
@@ -297,8 +369,7 @@ fn run_network(server_info: ServerInfo, server_world: ServerWorld) -> Result<(),
                     &socket,
                     addr,
                     packet,
-                    &server_info,
-                    &server_world,
+                    &context,
                     &mut clients,
                     &mut challenges,
                     &mut rng_state,
@@ -310,7 +381,7 @@ fn run_network(server_info: ServerInfo, server_world: ServerWorld) -> Result<(),
             Err(err) => return Err(ServerError::Net(err)),
         }
 
-        if run_once && start.elapsed() > Duration::from_millis(200) {
+        if run_once && context.start.elapsed() > Duration::from_millis(200) {
             break;
         }
     }
@@ -322,8 +393,7 @@ fn handle_packet(
     socket: &UdpSocket,
     addr: SocketAddr,
     packet: &[u8],
-    server_info: &ServerInfo,
-    server_world: &ServerWorld,
+    context: &ServerContext,
     clients: &mut HashMap<SocketAddr, ClientState>,
     challenges: &mut HashMap<SocketAddr, i32>,
     rng_state: &mut u32,
@@ -332,7 +402,7 @@ fn handle_packet(
         return handle_oob(socket, addr, payload, clients, challenges, rng_state);
     }
 
-    handle_inband(socket, addr, packet, server_info, server_world, clients)
+    handle_inband(socket, addr, packet, context, clients)
 }
 
 fn handle_oob(
@@ -397,8 +467,7 @@ fn handle_inband(
     socket: &UdpSocket,
     addr: SocketAddr,
     packet: &[u8],
-    server_info: &ServerInfo,
-    server_world: &ServerWorld,
+    context: &ServerContext,
     clients: &mut HashMap<SocketAddr, ClientState>,
 ) -> Result<(), std::io::Error> {
     let Some(client) = clients.get_mut(&addr) else {
@@ -411,6 +480,7 @@ fn handle_inband(
         .map_err(netchan_to_io)?;
     let mut reader = MsgReader::new(payload);
     let mut pending = None;
+    let mut saw_move = false;
 
     while reader.remaining() > 0 {
         let cmd = match pending.take() {
@@ -425,10 +495,11 @@ fn handle_inband(
             Clc::Nop => {}
             Clc::StringCmd => {
                 let text = reader.read_string().map_err(msg_to_io)?;
-                handle_string_cmd(socket, addr, client, server_info, server_world, &text)?;
+                handle_string_cmd(socket, addr, client, &context.info, &context.world, &text)?;
             }
             Clc::Move => {
                 pending = skip_move(&mut reader).map_err(msg_to_io)?;
+                saw_move = true;
             }
             Clc::Delta => {
                 let _ = reader.read_u8().map_err(msg_to_io)?;
@@ -444,6 +515,10 @@ fn handle_inband(
             }
             _ => break,
         }
+    }
+
+    if saw_move {
+        maybe_send_frame(socket, addr, client, context)?;
     }
 
     Ok(())
@@ -568,6 +643,10 @@ fn send_prespawn(
             attenuation: sound.attenuation,
         });
     }
+    messages.push(SvcMessage::SpawnBaseline {
+        entity: server_world.player_baseline.number as u16,
+        baseline: server_world.player_baseline,
+    });
     messages.push(SvcMessage::StuffText("cmd spawn 0 0\n".to_string()));
     client.signon = 2;
     send_svc_messages(socket, addr, client, &messages)
@@ -620,6 +699,24 @@ fn send_svc_messages(
     Ok(())
 }
 
+fn send_unreliable_messages(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    client: &mut ClientState,
+    messages: &[SvcMessage],
+) -> Result<(), std::io::Error> {
+    let mut buf = SizeBuf::new(2048);
+    for message in messages {
+        write_svc_message(&mut buf, message).map_err(sizebuf_to_io)?;
+    }
+    let packet = client
+        .netchan
+        .build_packet(buf.as_slice(), false)
+        .map_err(netchan_to_io)?;
+    socket.send_to(&packet, addr)?;
+    Ok(())
+}
+
 fn build_list_chunk(list: &[String], start: u8) -> StringListChunk {
     let start_index = start as usize;
     if start_index >= list.len() {
@@ -645,6 +742,49 @@ fn build_list_chunk(list: &[String], start: u8) -> StringListChunk {
     };
 
     StringListChunk { start, items, next }
+}
+
+fn find_spawn_point(entities: &[Entity]) -> SpawnPoint {
+    let candidates = ["info_player_start", "info_player_deathmatch"];
+    for name in candidates {
+        if let Some(entity) = entities.iter().find(|entity| {
+            entity
+                .get("classname")
+                .map(|value| value.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        }) {
+            return spawn_from_entity(entity);
+        }
+    }
+    SpawnPoint::default()
+}
+
+fn spawn_from_entity(entity: &Entity) -> SpawnPoint {
+    let origin = entity
+        .get("origin")
+        .and_then(parse_vec3)
+        .unwrap_or_default();
+    let angles = entity
+        .get("angles")
+        .and_then(parse_vec3)
+        .or_else(|| {
+            entity
+                .get("angle")
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .map(|yaw| Vec3::new(0.0, yaw, 0.0))
+        })
+        .unwrap_or_default();
+    SpawnPoint { origin, angles }
+}
+
+fn parse_vec3(value: &str) -> Option<Vec3> {
+    let mut iter = value
+        .split(|ch: char| ch == ' ' || ch == '\t')
+        .filter(|part| !part.is_empty());
+    let x = iter.next()?.parse::<f32>().ok()?;
+    let y = iter.next()?.parse::<f32>().ok()?;
+    let z = iter.next()?.parse::<f32>().ok()?;
+    Some(Vec3::new(x, y, z))
 }
 
 fn server_info_messages(server_info: &ServerInfo) -> Vec<SvcMessage> {
@@ -682,6 +822,70 @@ fn default_client_data() -> ClientDataMessage {
         ammo_counts: [0; 4],
         active_weapon: 0,
     }
+}
+
+fn maybe_send_frame(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    client: &mut ClientState,
+    context: &ServerContext,
+) -> Result<(), std::io::Error> {
+    if client.signon < 3 {
+        return Ok(());
+    }
+    if client.last_frame.elapsed() < Duration::from_millis(50) {
+        return Ok(());
+    }
+
+    let server_time = context.start.elapsed().as_secs_f32();
+    let delta = entity_delta_from(&context.world.player_baseline);
+    let update = PacketEntitiesUpdate {
+        delta_from: None,
+        entities: vec![delta],
+    };
+    let messages = [
+        SvcMessage::Time(server_time),
+        SvcMessage::PlayerInfo(context.world.player_info.clone()),
+        SvcMessage::PacketEntities(update),
+    ];
+    send_unreliable_messages(socket, addr, client, &messages)?;
+    client.last_frame = Instant::now();
+    Ok(())
+}
+
+fn entity_delta_from(state: &EntityState) -> EntityDelta {
+    let number = state.number.max(0).min(u16::MAX as i32) as u16;
+    EntityDelta {
+        number,
+        remove: false,
+        flags: 0,
+        model_index: clamp_entity_u8(state.modelindex),
+        frame: clamp_entity_u8(state.frame),
+        colormap: clamp_entity_u8(state.colormap),
+        skin_num: clamp_entity_u8(state.skinnum),
+        effects: clamp_entity_u8(state.effects),
+        origin: [
+            Some(state.origin.x),
+            Some(state.origin.y),
+            Some(state.origin.z),
+        ],
+        angles: [
+            Some(state.angles.x),
+            Some(state.angles.y),
+            Some(state.angles.z),
+        ],
+        solid: false,
+    }
+}
+
+fn clamp_entity_u8(value: i32) -> Option<u8> {
+    if value < 0 {
+        return Some(0);
+    }
+    if value > u8::MAX as i32 {
+        return Some(u8::MAX);
+    }
+    Some(value as u8)
 }
 
 fn skip_move(reader: &mut MsgReader) -> Result<Option<u8>, MsgReadError> {
