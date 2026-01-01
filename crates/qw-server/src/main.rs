@@ -66,6 +66,12 @@ fn run() -> Result<(), ServerError> {
                 describe_vm_error(&vm, &err)
             );
         }
+        if let Err(err) = vm.call_by_name("StartFrame", MAX_QC_STEPS) {
+            println!(
+                "[server] qc start frame failed: {}",
+                describe_vm_error(&vm, &err)
+            );
+        }
     }
 
     Ok(())
