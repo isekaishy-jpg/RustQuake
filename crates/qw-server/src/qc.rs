@@ -25,6 +25,15 @@ struct QcGlobals {
     v_forward_ofs: Option<i16>,
     v_right_ofs: Option<i16>,
     v_up_ofs: Option<i16>,
+    trace_allsolid_ofs: Option<i16>,
+    trace_startsolid_ofs: Option<i16>,
+    trace_fraction_ofs: Option<i16>,
+    trace_endpos_ofs: Option<i16>,
+    trace_plane_normal_ofs: Option<i16>,
+    trace_plane_dist_ofs: Option<i16>,
+    trace_ent_ofs: Option<i16>,
+    trace_inopen_ofs: Option<i16>,
+    trace_inwater_ofs: Option<i16>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -110,6 +119,15 @@ fn resolve_globals(vm: &Vm) -> QcGlobals {
         v_forward_ofs: global_offset(vm, "v_forward"),
         v_right_ofs: global_offset(vm, "v_right"),
         v_up_ofs: global_offset(vm, "v_up"),
+        trace_allsolid_ofs: global_offset(vm, "trace_allsolid"),
+        trace_startsolid_ofs: global_offset(vm, "trace_startsolid"),
+        trace_fraction_ofs: global_offset(vm, "trace_fraction"),
+        trace_endpos_ofs: global_offset(vm, "trace_endpos"),
+        trace_plane_normal_ofs: global_offset(vm, "trace_plane_normal"),
+        trace_plane_dist_ofs: global_offset(vm, "trace_plane_dist"),
+        trace_ent_ofs: global_offset(vm, "trace_ent"),
+        trace_inopen_ofs: global_offset(vm, "trace_inopen"),
+        trace_inwater_ofs: global_offset(vm, "trace_inwater"),
     }
 }
 
@@ -189,6 +207,7 @@ fn register_builtins(vm: &mut Vm) {
             "remove" => builtin_remove,
             "find" => builtin_find,
             "nextent" => builtin_nextent,
+            "traceline" => builtin_traceline,
             "vlen" => builtin_vlen,
             "normalize" => builtin_normalize,
             "vectoyaw" => builtin_vectoyaw,
@@ -416,6 +435,44 @@ fn builtin_nextent(vm: &mut Vm) -> Result<(), VmError> {
     }
 
     vm.set_return_f32(0.0)
+}
+
+fn builtin_traceline(vm: &mut Vm) -> Result<(), VmError> {
+    let end = vm.read_param_vec(1)?;
+    let globals = vm
+        .context_ref::<ServerQcContext>()
+        .map(|ctx| ctx.globals)
+        .unwrap_or_default();
+
+    if let Some(ofs) = globals.trace_allsolid_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+    if let Some(ofs) = globals.trace_startsolid_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+    if let Some(ofs) = globals.trace_fraction_ofs {
+        vm.write_global_f32(ofs, 1.0)?;
+    }
+    if let Some(ofs) = globals.trace_endpos_ofs {
+        vm.write_global_vec(ofs, end)?;
+    }
+    if let Some(ofs) = globals.trace_plane_normal_ofs {
+        vm.write_global_vec(ofs, Vec3::default())?;
+    }
+    if let Some(ofs) = globals.trace_plane_dist_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+    if let Some(ofs) = globals.trace_ent_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+    if let Some(ofs) = globals.trace_inopen_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+    if let Some(ofs) = globals.trace_inwater_ofs {
+        vm.write_global_f32(ofs, 0.0)?;
+    }
+
+    vm.set_return_f32(1.0)
 }
 
 fn builtin_vlen(vm: &mut Vm) -> Result<(), VmError> {
