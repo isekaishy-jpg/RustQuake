@@ -1,9 +1,14 @@
 use qw_common::{
-    Bsp, BspError, DataPathError, Entity, EntityError, FsError, QuakeFs, find_game_dir,
-    find_id1_dir, locate_data_dir, parse_entities,
+    A2A_ACK, A2A_ECHO, Bsp, BspError, DataPathError, Entity, EntityError, FsError, OobMessage,
+    PORT_SERVER, PROTOCOL_VERSION, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, build_out_of_band,
+    find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload, parse_entities,
+    parse_oob_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
+use std::collections::HashMap;
 use std::env;
+use std::net::{SocketAddr, UdpSocket};
+use std::time::{Duration, Instant};
 
 mod qc;
 
@@ -74,6 +79,8 @@ fn run() -> Result<(), ServerError> {
         }
     }
 
+    run_network()?;
+
     Ok(())
 }
 
@@ -85,6 +92,7 @@ enum ServerError {
     Vm(VmError),
     Bsp(BspError),
     Entities(EntityError),
+    Net(std::io::Error),
     GameDirMissing,
     ProgsMissing,
 }
@@ -98,6 +106,7 @@ impl std::fmt::Display for ServerError {
             ServerError::Vm(err) => write!(f, "vm error: {:?}", err),
             ServerError::Bsp(err) => write!(f, "bsp error: {}", err),
             ServerError::Entities(err) => write!(f, "entity parse error: {:?}", err),
+            ServerError::Net(err) => write!(f, "network error: {err}"),
             ServerError::GameDirMissing => write!(f, "game directory not found"),
             ServerError::ProgsMissing => write!(f, "progs.dat or qwprogs.dat not found"),
         }
@@ -110,6 +119,136 @@ fn load_map_entities(fs: &QuakeFs, map_name: &str) -> Result<Vec<Entity>, Server
     let bsp = Bsp::from_bytes(bytes).map_err(ServerError::Bsp)?;
     let text = bsp.entities_text().map_err(ServerError::Bsp)?;
     parse_entities(&text).map_err(ServerError::Entities)
+}
+
+fn run_network() -> Result<(), ServerError> {
+    let bind_addr = format!("0.0.0.0:{PORT_SERVER}");
+    let socket = UdpSocket::bind(&bind_addr).map_err(ServerError::Net)?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .map_err(ServerError::Net)?;
+    println!("[server] listening on {bind_addr}");
+
+    let mut rng_state = 0x1234_5678u32;
+    let mut challenges: HashMap<SocketAddr, i32> = HashMap::new();
+    let run_once = env::var("RUSTQUAKE_RUN_ONCE").is_ok();
+    let start = Instant::now();
+    let mut buf = [0u8; 1400];
+
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((len, addr)) => {
+                let packet = &buf[..len];
+                handle_packet(&socket, addr, packet, &mut challenges, &mut rng_state)
+                    .map_err(ServerError::Net)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(err) => return Err(ServerError::Net(err)),
+        }
+
+        if run_once && start.elapsed() > Duration::from_millis(200) {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_packet(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    packet: &[u8],
+    challenges: &mut HashMap<SocketAddr, i32>,
+    rng_state: &mut u32,
+) -> Result<(), std::io::Error> {
+    let Some(payload) = out_of_band_payload(packet) else {
+        return Ok(());
+    };
+    let text = String::from_utf8_lossy(payload);
+    let trimmed = text.trim_matches(|ch| ch == '\0' || ch == '\n' || ch == '\r');
+
+    if trimmed.starts_with("getchallenge") {
+        let challenge = next_challenge(rng_state);
+        challenges.insert(addr, challenge);
+        let mut reply = Vec::new();
+        reply.push(S2C_CHALLENGE);
+        reply.extend_from_slice(challenge.to_string().as_bytes());
+        reply.push(0);
+        let packet = build_out_of_band(&reply);
+        socket.send_to(&packet, addr)?;
+        return Ok(());
+    }
+
+    if trimmed.starts_with("connect") {
+        if let Some(connect) = parse_connect(trimmed) {
+            if connect.protocol == PROTOCOL_VERSION {
+                let matches = challenges.get(&addr).copied() == Some(connect.challenge);
+                if matches {
+                    let packet = build_out_of_band(&[S2C_CONNECTION, 0]);
+                    socket.send_to(&packet, addr)?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(msg) = parse_oob_message(payload) {
+        match msg {
+            OobMessage::Ping => {
+                let packet = build_out_of_band(&[A2A_ACK, b'\n']);
+                socket.send_to(&packet, addr)?;
+            }
+            OobMessage::Echo(value) => {
+                let mut reply = Vec::new();
+                reply.push(A2A_ECHO);
+                reply.extend_from_slice(value.as_bytes());
+                reply.push(0);
+                let packet = build_out_of_band(&reply);
+                socket.send_to(&packet, addr)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn next_challenge(state: &mut u32) -> i32 {
+    *state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+    (*state & 0x7FFF_FFFF) as i32
+}
+
+#[derive(Debug, Clone)]
+struct ConnectInfo {
+    protocol: i32,
+    _qport: u16,
+    challenge: i32,
+    _userinfo: String,
+}
+
+fn parse_connect(text: &str) -> Option<ConnectInfo> {
+    let quote_start = text.find('"')?;
+    let quote_end = text.rfind('"')?;
+    if quote_end <= quote_start {
+        return None;
+    }
+    let userinfo = text[quote_start + 1..quote_end].to_string();
+    let head = &text[..quote_start];
+    let mut parts = head.split_whitespace();
+    let cmd = parts.next()?;
+    if cmd != "connect" {
+        return None;
+    }
+    let protocol = parts.next()?.parse::<i32>().ok()?;
+    let qport = parts.next()?.parse::<u16>().ok()?;
+    let challenge = parts.next()?.parse::<i32>().ok()?;
+    Some(ConnectInfo {
+        protocol,
+        _qport: qport,
+        challenge,
+        _userinfo: userinfo,
+    })
 }
 
 fn describe_vm_error(vm: &Vm, err: &VmError) -> String {
