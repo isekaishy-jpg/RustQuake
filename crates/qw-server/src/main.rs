@@ -1,10 +1,11 @@
 use qw_common::{
     A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityDelta,
     EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError,
-    OobMessage, PF_COMMAND, PF_MSEC, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate,
-    PlayerInfoMessage, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf,
-    StringListChunk, SvcMessage, UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir,
-    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, write_svc_message,
+    OobMessage, PF_COMMAND, PF_MSEC, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3, PORT_SERVER,
+    PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs, S2C_CHALLENGE,
+    S2C_CONNECTION, ServerData, SizeBuf, StringListChunk, SvcMessage, UPDATE_MASK, UserCmd, Vec3,
+    build_out_of_band, find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload,
+    parse_entities, parse_oob_message, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -51,7 +52,11 @@ struct ClientState {
     last_frame: Instant,
     player_origin: Vec3,
     player_angles: Vec3,
+    player_velocity: Vec3,
     last_cmd: UserCmd,
+    ground_z: f32,
+    last_sent_state: EntityState,
+    last_packet_sequence: Option<u32>,
 }
 
 impl ClientState {
@@ -64,7 +69,11 @@ impl ClientState {
             last_frame: Instant::now(),
             player_origin: Vec3::default(),
             player_angles: Vec3::default(),
+            player_velocity: Vec3::default(),
             last_cmd: UserCmd::default(),
+            ground_z: 0.0,
+            last_sent_state: EntityState::default(),
+            last_packet_sequence: None,
         }
     }
 }
@@ -489,6 +498,7 @@ fn handle_inband(
             }
             Clc::Move => {
                 let parsed = parse_move(&mut reader).map_err(msg_to_io)?;
+                apply_move(&context.info.movevars, client, parsed.cmd);
                 client.last_cmd = parsed.cmd;
                 client.player_angles = parsed.cmd.angles;
                 pending = parsed.next;
@@ -654,10 +664,14 @@ fn send_spawn(
 ) -> Result<(), std::io::Error> {
     client.player_origin = server_world.spawn_point.origin;
     client.player_angles = server_world.spawn_point.angles;
+    client.player_velocity = Vec3::default();
     client.last_cmd = UserCmd {
         angles: server_world.spawn_point.angles,
         ..UserCmd::default()
     };
+    client.ground_z = server_world.spawn_point.origin.z;
+    client.last_sent_state = server_world.player_baseline;
+    client.last_packet_sequence = None;
 
     let mut messages = Vec::new();
     messages.push(SvcMessage::SignonNum(3));
@@ -840,10 +854,14 @@ fn maybe_send_frame(
 
     let server_time = context.start.elapsed().as_secs_f32();
     let player_state = player_state_for_client(&context.world, client);
-    let delta = entity_delta_from(&player_state);
+    let delta = entity_delta_between(&client.last_sent_state, &player_state);
+    let delta_from = client
+        .last_packet_sequence
+        .map(|seq| (seq & UPDATE_MASK as u32) as u8);
+    let outgoing_seq = client.netchan.outgoing_sequence();
     let update = PacketEntitiesUpdate {
-        delta_from: None,
-        entities: vec![delta],
+        delta_from,
+        entities: delta.into_iter().collect(),
     };
     let info = build_player_info(0, client);
     let messages = [
@@ -853,6 +871,8 @@ fn maybe_send_frame(
         SvcMessage::PacketEntities(update),
     ];
     send_unreliable_messages(socket, addr, client, &messages)?;
+    client.last_sent_state = player_state;
+    client.last_packet_sequence = Some(outgoing_seq);
     client.last_frame = Instant::now();
     Ok(())
 }
@@ -866,19 +886,19 @@ fn player_state_for_client(server_world: &ServerWorld, client: &ClientState) -> 
 
 fn build_player_info(num: u8, client: &ClientState) -> PlayerInfoMessage {
     let cmd = client.last_cmd;
-    let mut flags = PF_COMMAND as u16;
-    let msec = Some(cmd.msec);
-    if msec.is_some() {
-        flags |= PF_MSEC as u16;
-    }
+    let flags = (PF_COMMAND | PF_MSEC | PF_VELOCITY1 | PF_VELOCITY2 | PF_VELOCITY3) as u16;
     PlayerInfoMessage {
         num,
         flags,
         origin: client.player_origin,
         frame: 0,
-        msec,
+        msec: Some(cmd.msec),
         command: Some(cmd),
-        velocity: [0; 3],
+        velocity: [
+            clamp_i16(client.player_velocity.x),
+            clamp_i16(client.player_velocity.y),
+            clamp_i16(client.player_velocity.z),
+        ],
         model_index: None,
         skin_num: None,
         effects: None,
@@ -886,29 +906,59 @@ fn build_player_info(num: u8, client: &ClientState) -> PlayerInfoMessage {
     }
 }
 
-fn entity_delta_from(state: &EntityState) -> EntityDelta {
-    let number = state.number.max(0).min(u16::MAX as i32) as u16;
-    EntityDelta {
-        number,
+fn entity_delta_between(from: &EntityState, to: &EntityState) -> Option<EntityDelta> {
+    let mut origin = [None; 3];
+    let mut angles = [None; 3];
+
+    if from.origin.x != to.origin.x {
+        origin[0] = Some(to.origin.x);
+    }
+    if from.origin.y != to.origin.y {
+        origin[1] = Some(to.origin.y);
+    }
+    if from.origin.z != to.origin.z {
+        origin[2] = Some(to.origin.z);
+    }
+    if from.angles.x != to.angles.x {
+        angles[0] = Some(to.angles.x);
+    }
+    if from.angles.y != to.angles.y {
+        angles[1] = Some(to.angles.y);
+    }
+    if from.angles.z != to.angles.z {
+        angles[2] = Some(to.angles.z);
+    }
+
+    let model_index = (from.modelindex != to.modelindex).then(|| clamp_entity_u8(to.modelindex));
+    let frame = (from.frame != to.frame).then(|| clamp_entity_u8(to.frame));
+    let colormap = (from.colormap != to.colormap).then(|| clamp_entity_u8(to.colormap));
+    let skin_num = (from.skinnum != to.skinnum).then(|| clamp_entity_u8(to.skinnum));
+    let effects = (from.effects != to.effects).then(|| clamp_entity_u8(to.effects));
+
+    if origin.iter().all(Option::is_none)
+        && angles.iter().all(Option::is_none)
+        && model_index.is_none()
+        && frame.is_none()
+        && colormap.is_none()
+        && skin_num.is_none()
+        && effects.is_none()
+    {
+        return None;
+    }
+
+    Some(EntityDelta {
+        number: to.number.max(0).min(u16::MAX as i32) as u16,
         remove: false,
         flags: 0,
-        model_index: clamp_entity_u8(state.modelindex),
-        frame: clamp_entity_u8(state.frame),
-        colormap: clamp_entity_u8(state.colormap),
-        skin_num: clamp_entity_u8(state.skinnum),
-        effects: clamp_entity_u8(state.effects),
-        origin: [
-            Some(state.origin.x),
-            Some(state.origin.y),
-            Some(state.origin.z),
-        ],
-        angles: [
-            Some(state.angles.x),
-            Some(state.angles.y),
-            Some(state.angles.z),
-        ],
+        model_index: model_index.flatten(),
+        frame: frame.flatten(),
+        colormap: colormap.flatten(),
+        skin_num: skin_num.flatten(),
+        effects: effects.flatten(),
+        origin,
+        angles,
         solid: false,
-    }
+    })
 }
 
 fn clamp_entity_u8(value: i32) -> Option<u8> {
@@ -919,6 +969,108 @@ fn clamp_entity_u8(value: i32) -> Option<u8> {
         return Some(u8::MAX);
     }
     Some(value as u8)
+}
+
+fn clamp_i16(value: f32) -> i16 {
+    value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+fn apply_move(movevars: &MoveVars, client: &mut ClientState, cmd: UserCmd) {
+    if cmd.msec == 0 {
+        client.player_velocity = Vec3::default();
+        return;
+    }
+
+    let dt = cmd.msec as f32 / 1000.0;
+    let (forward, right, up) = angles_to_vectors(cmd.angles);
+    let wish = Vec3::new(
+        forward.x * cmd.forwardmove as f32
+            + right.x * cmd.sidemove as f32
+            + up.x * cmd.upmove as f32,
+        forward.y * cmd.forwardmove as f32
+            + right.y * cmd.sidemove as f32
+            + up.y * cmd.upmove as f32,
+        forward.z * cmd.forwardmove as f32
+            + right.z * cmd.sidemove as f32
+            + up.z * cmd.upmove as f32,
+    );
+
+    let mut velocity = client.player_velocity;
+    velocity = apply_friction(velocity, movevars.friction, dt);
+    velocity = apply_accel(velocity, wish, movevars.maxspeed, movevars.accelerate, dt);
+    velocity.z -= movevars.gravity * movevars.entgravity * dt;
+
+    client.player_velocity = velocity;
+    client.player_origin = Vec3::new(
+        client.player_origin.x + velocity.x * dt,
+        client.player_origin.y + velocity.y * dt,
+        client.player_origin.z + velocity.z * dt,
+    );
+    if client.player_origin.z < client.ground_z {
+        client.player_origin.z = client.ground_z;
+        if client.player_velocity.z < 0.0 {
+            client.player_velocity.z = 0.0;
+        }
+    }
+}
+
+fn vec_length(vec: Vec3) -> f32 {
+    vec.dot(vec).sqrt()
+}
+
+fn apply_friction(mut velocity: Vec3, friction: f32, dt: f32) -> Vec3 {
+    let horizontal = Vec3::new(velocity.x, velocity.y, 0.0);
+    let speed = vec_length(horizontal);
+    if speed < 1.0 {
+        velocity.x = 0.0;
+        velocity.y = 0.0;
+        return velocity;
+    }
+    let drop = speed * friction * dt;
+    let new_speed = (speed - drop).max(0.0);
+    if new_speed > 0.0 {
+        let scale = new_speed / speed;
+        velocity.x *= scale;
+        velocity.y *= scale;
+    } else {
+        velocity.x = 0.0;
+        velocity.y = 0.0;
+    }
+    velocity
+}
+
+fn apply_accel(velocity: Vec3, wish: Vec3, maxspeed: f32, accel: f32, dt: f32) -> Vec3 {
+    let wish_speed = vec_length(wish);
+    if wish_speed == 0.0 {
+        return velocity;
+    }
+    let wish_dir = wish.scale(1.0 / wish_speed);
+    let capped = wish_speed.min(maxspeed);
+    let current = velocity.dot(wish_dir);
+    let add_speed = capped - current;
+    if add_speed <= 0.0 {
+        return velocity;
+    }
+    let accel_speed = (accel * dt * capped).min(add_speed);
+    Vec3::new(
+        velocity.x + wish_dir.x * accel_speed,
+        velocity.y + wish_dir.y * accel_speed,
+        velocity.z + wish_dir.z * accel_speed,
+    )
+}
+
+fn angles_to_vectors(angles: Vec3) -> (Vec3, Vec3, Vec3) {
+    let pitch = angles.x.to_radians();
+    let yaw = angles.y.to_radians();
+    let cp = pitch.cos();
+    let sp = pitch.sin();
+    let cy = yaw.cos();
+    let sy = yaw.sin();
+
+    let forward = Vec3::new(cp * cy, cp * sy, -sp);
+    let right = Vec3::new(-sy, cy, 0.0);
+    let up = Vec3::new(0.0, 0.0, 1.0);
+    (forward, right, up)
 }
 
 struct MoveParseResult {
@@ -1026,6 +1178,14 @@ fn describe_vm_error(vm: &Vm, err: &VmError) -> String {
 mod tests {
     use super::*;
 
+    fn assert_close(actual: f32, expected: f32) {
+        let eps = 0.01;
+        assert!(
+            (actual - expected).abs() < eps,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn finds_spawn_point_from_entities() {
         let text = r#"
@@ -1098,5 +1258,49 @@ mod tests {
         assert!((parsed.cmd.angles.y - cmd2.angles.y).abs() < angle_eps);
         assert!((parsed.cmd.angles.z - cmd2.angles.z).abs() < angle_eps);
         assert_eq!(parsed.next, Some(Clc::StringCmd as u8));
+    }
+
+    #[test]
+    fn angles_to_vectors_basic_axes() {
+        let (forward, right, up) = angles_to_vectors(Vec3::new(0.0, 0.0, 0.0));
+        assert_close(forward.x, 1.0);
+        assert_close(forward.y, 0.0);
+        assert_close(forward.z, 0.0);
+        assert_close(right.x, 0.0);
+        assert_close(right.y, 1.0);
+        assert_close(right.z, 0.0);
+        assert_close(up.x, 0.0);
+        assert_close(up.y, 0.0);
+        assert_close(up.z, 1.0);
+    }
+
+    #[test]
+    fn apply_move_advances_origin_and_velocity() {
+        let movevars = MoveVars {
+            gravity: 800.0,
+            stopspeed: 100.0,
+            maxspeed: 320.0,
+            spectatormaxspeed: 500.0,
+            accelerate: 10.0,
+            airaccelerate: 0.0,
+            wateraccelerate: 10.0,
+            friction: 6.0,
+            waterfriction: 1.0,
+            entgravity: 1.0,
+        };
+        let mut client = ClientState::new(0, "\\name\\tester".to_string());
+        client.player_origin = Vec3::default();
+        let cmd = UserCmd {
+            msec: 100,
+            angles: Vec3::new(0.0, 0.0, 0.0),
+            forwardmove: 100,
+            sidemove: 0,
+            upmove: 0,
+            buttons: 0,
+            impulse: 0,
+        };
+        apply_move(&movevars, &mut client, cmd);
+        assert_close(client.player_velocity.x, 100.0);
+        assert_close(client.player_origin.x, 10.0);
     }
 }
