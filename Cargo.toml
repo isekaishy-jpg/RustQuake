@@ -3,6 +3,7 @@ members = [
   "crates/qw-audio",
   "crates/qw-common",
   "crates/qw-client",
+  "crates/qw-qc",
   "crates/qw-renderer",
   "crates/qw-renderer-gl",
   "crates/qw-server",

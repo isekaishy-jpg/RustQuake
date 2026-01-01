@@ -1,9 +1,8 @@
 [package]
-name = "qw-server"
+name = "qw-qc"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-only"
 
 [dependencies]
 qw-common = { path = "../qw-common" }
-qw-qc = { path = "../qw-qc" }

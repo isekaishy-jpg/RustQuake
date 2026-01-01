@@ -775,6 +775,13 @@ name = "qw-common"
 version = "0.1.0"
 
 [[package]]
+name = "qw-qc"
+version = "0.1.0"
+dependencies = [
+ "qw-common",
+]
+
+[[package]]
 name = "qw-renderer"
 version = "0.1.0"
 dependencies = [
@@ -793,6 +800,10 @@ dependencies = [
 [[package]]
 name = "qw-server"
 version = "0.1.0"
+dependencies = [
+ "qw-common",
+ "qw-qc",
+]
 
 [[package]]
 name = "qw-window-glfw"
