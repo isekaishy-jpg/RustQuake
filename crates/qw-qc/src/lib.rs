@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use qw_common::Vec3;
+use std::any::Any;
 
 pub const PROG_VERSION: i32 = 6;
 const DEF_SAVEGLOBAL: i16 = 1 << 15;
@@ -147,9 +148,11 @@ pub enum VmError {
     BadFunction(i32),
     BadEdict(i32),
     BadField(i32),
+    BadString(i32),
     UnsupportedOpcode(u16),
     BuiltinNotRegistered(i32),
     StepLimit,
+    StringOverflow,
 }
 
 type VmResult<T> = Result<T, VmError>;
@@ -184,6 +187,7 @@ pub struct Vm {
     call_stack: Vec<CallFrame>,
     edicts: Vec<Edict>,
     builtins: Vec<Option<BuiltinFn>>,
+    context: Option<Box<dyn Any>>,
 }
 
 impl Vm {
@@ -198,7 +202,26 @@ impl Vm {
             call_stack: Vec::new(),
             edicts,
             builtins: Vec::new(),
+            context: None,
         }
+    }
+
+    pub fn with_context<T: Any>(progs: ProgsDat, context: T) -> Self {
+        let mut vm = Self::new(progs);
+        vm.context = Some(Box::new(context));
+        vm
+    }
+
+    pub fn set_context<T: Any>(&mut self, context: T) {
+        self.context = Some(Box::new(context));
+    }
+
+    pub fn context_ref<T: Any>(&self) -> Option<&T> {
+        self.context.as_deref()?.downcast_ref::<T>()
+    }
+
+    pub fn context_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.context.as_deref_mut()?.downcast_mut::<T>()
     }
 
     pub fn progs(&self) -> &ProgsDat {
@@ -246,6 +269,53 @@ impl Vm {
     pub fn call_function(&mut self, index: usize, max_steps: usize) -> VmResult<()> {
         self.enter_function(index, None)?;
         self.execute(max_steps)
+    }
+
+    pub fn read_param_raw(&self, param: usize) -> VmResult<u32> {
+        let ofs = OFS_PARM0 + param * PARAM_SLOT_SIZE;
+        self.read_raw(ofs as i16)
+    }
+
+    pub fn read_param_f32(&self, param: usize) -> VmResult<f32> {
+        let ofs = OFS_PARM0 + param * PARAM_SLOT_SIZE;
+        self.read_f32(ofs as i16)
+    }
+
+    pub fn read_param_vec(&self, param: usize) -> VmResult<Vec3> {
+        let ofs = OFS_PARM0 + param * PARAM_SLOT_SIZE;
+        self.read_vec(ofs as i16)
+    }
+
+    pub fn read_param_string(&self, param: usize) -> VmResult<String> {
+        let offset = self.read_param_raw(param)? as i32;
+        self.progs
+            .string_at(offset)
+            .map_err(|_| VmError::BadString(offset))
+    }
+
+    pub fn set_return_raw(&mut self, value: u32) -> VmResult<()> {
+        self.write_raw(OFS_RETURN as i16, value)
+    }
+
+    pub fn set_return_f32(&mut self, value: f32) -> VmResult<()> {
+        self.write_f32(OFS_RETURN as i16, value)
+    }
+
+    pub fn set_return_vec(&mut self, value: Vec3) -> VmResult<()> {
+        self.write_vec(OFS_RETURN as i16, value)
+    }
+
+    pub fn set_return_string(&mut self, value: &str) -> VmResult<()> {
+        let offset = self.alloc_string(value)?;
+        self.write_raw(OFS_RETURN as i16, offset as u32)
+    }
+
+    pub fn alloc_string(&mut self, value: &str) -> VmResult<i32> {
+        let offset =
+            i32::try_from(self.progs.strings.len()).map_err(|_| VmError::StringOverflow)?;
+        self.progs.strings.extend_from_slice(value.as_bytes());
+        self.progs.strings.push(0);
+        Ok(offset)
     }
 
     pub fn read_global_raw(&self, ofs: i16) -> VmResult<u32> {

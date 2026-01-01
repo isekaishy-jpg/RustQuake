@@ -1,6 +1,8 @@
 use qw_common::{DataPathError, FsError, QuakeFs, find_game_dir, find_id1_dir, locate_data_dir};
-use qw_qc::{ProgsDat, ProgsError, Vm};
+use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::env;
+
+mod qc;
 
 fn main() {
     if let Err(err) = run() {
@@ -29,7 +31,9 @@ fn run() -> Result<(), ServerError> {
 
     let bytes = fs.read(progs_name).map_err(ServerError::Fs)?;
     let progs = ProgsDat::from_bytes(&bytes).map_err(ServerError::Progs)?;
-    let mut vm = Vm::new(progs);
+    let map_name = env::var("RUSTQUAKE_MAP").unwrap_or_else(|_| "start".to_string());
+    let mut vm = Vm::with_context(progs, qc::ServerQcContext::default());
+    qc::configure_vm(&mut vm, &map_name).map_err(ServerError::Vm)?;
 
     let func_count = vm.progs().functions.len();
     let global_count = vm.progs().globals.len();
@@ -46,6 +50,7 @@ enum ServerError {
     DataPath(DataPathError),
     Fs(FsError),
     Progs(ProgsError),
+    Vm(VmError),
     GameDirMissing,
     ProgsMissing,
 }
@@ -56,6 +61,7 @@ impl std::fmt::Display for ServerError {
             ServerError::DataPath(err) => write!(f, "data path error: {:?}", err),
             ServerError::Fs(err) => write!(f, "fs error: {:?}", err),
             ServerError::Progs(err) => write!(f, "progs error: {:?}", err),
+            ServerError::Vm(err) => write!(f, "vm error: {:?}", err),
             ServerError::GameDirMissing => write!(f, "game directory not found"),
             ServerError::ProgsMissing => write!(f, "progs.dat or qwprogs.dat not found"),
         }
