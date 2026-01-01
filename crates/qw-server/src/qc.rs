@@ -1,4 +1,4 @@
-use qw_common::{Entity, Vec3};
+use qw_common::{Entity, EntityState, Vec3};
 use qw_qc::{QcType, Vm, VmError};
 use std::collections::HashMap;
 
@@ -18,10 +18,20 @@ pub struct ServerQcContext {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct ServerQcAmbientSound {
+    pub origin: Vec3,
+    pub sample: String,
+    pub volume: f32,
+    pub attenuation: f32,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ServerQcSnapshot {
     pub precache_models: Vec<String>,
     pub precache_sounds: Vec<String>,
     pub lightstyles: Vec<Option<String>>,
+    pub ambient_sounds: Vec<ServerQcAmbientSound>,
+    pub static_entities: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +104,12 @@ struct QcFields {
     absmax: Option<usize>,
     model: Option<usize>,
     classname: Option<usize>,
+    angles: Option<usize>,
+    frame: Option<usize>,
+    skin: Option<usize>,
+    effects: Option<usize>,
+    colormap: Option<usize>,
+    modelindex: Option<usize>,
 }
 
 pub fn configure_vm(vm: &mut Vm, mapname: &str) -> Result<(), VmError> {
@@ -122,7 +138,54 @@ pub fn snapshot(vm: &Vm) -> ServerQcSnapshot {
         precache_models: ctx.precache_models.clone(),
         precache_sounds: ctx.precache_sounds.clone(),
         lightstyles: ctx.lightstyles.clone(),
+        ambient_sounds: ctx
+            .ambient_sounds
+            .iter()
+            .map(|sound| ServerQcAmbientSound {
+                origin: sound.origin,
+                sample: sound.sample.clone(),
+                volume: sound.volume,
+                attenuation: sound.attenuation,
+            })
+            .collect(),
+        static_entities: ctx.static_entities.clone(),
     }
+}
+
+pub fn entity_state(vm: &Vm, ent: usize, model_list: &[String]) -> Option<EntityState> {
+    if ent >= vm.edict_count() {
+        return None;
+    }
+    let fields = fields_from_context(vm);
+    let origin = read_field_vec(vm, ent, fields.origin);
+    let angles = read_field_vec(vm, ent, fields.angles);
+    let frame = read_field_f32(vm, ent, fields.frame).trunc() as i32;
+    let colormap = read_field_f32(vm, ent, fields.colormap).trunc() as i32;
+    let skinnum = read_field_f32(vm, ent, fields.skin).trunc() as i32;
+    let effects = read_field_f32(vm, ent, fields.effects).trunc() as i32;
+
+    let modelindex = read_field_f32(vm, ent, fields.modelindex).trunc() as i32;
+    let modelindex = if modelindex != 0 {
+        modelindex
+    } else {
+        let model_name = fields.model.and_then(|ofs| read_edict_string(vm, ent, ofs));
+        model_name
+            .as_deref()
+            .map(|name| model_index_for_name(name, model_list))
+            .unwrap_or(0)
+    };
+
+    Some(EntityState {
+        number: ent as i32,
+        flags: 0,
+        origin,
+        angles,
+        modelindex,
+        frame,
+        colormap,
+        skinnum,
+        effects,
+    })
 }
 
 pub fn apply_worldspawn(vm: &mut Vm, entities: &[Entity]) -> Result<(), VmError> {
@@ -200,6 +263,12 @@ fn resolve_fields(vm: &Vm) -> QcFields {
         absmax: field_offset(vm, "absmax"),
         model: field_offset(vm, "model"),
         classname: field_offset(vm, "classname"),
+        angles: field_offset(vm, "angles"),
+        frame: field_offset(vm, "frame"),
+        skin: field_offset(vm, "skin"),
+        effects: field_offset(vm, "effects"),
+        colormap: field_offset(vm, "colormap"),
+        modelindex: field_offset(vm, "modelindex"),
     }
 }
 
@@ -702,6 +771,34 @@ fn read_edict_string(vm: &Vm, ent: usize, field: usize) -> Option<String> {
         .copied()
         .unwrap_or(0);
     vm.progs().string_at(value as i32).ok()
+}
+
+fn read_field_f32(vm: &Vm, ent: usize, field: Option<usize>) -> f32 {
+    let Some(field) = field else {
+        return 0.0;
+    };
+    vm.read_edict_field_f32(ent, field).unwrap_or(0.0)
+}
+
+fn read_field_vec(vm: &Vm, ent: usize, field: Option<usize>) -> Vec3 {
+    let Some(field) = field else {
+        return Vec3::default();
+    };
+    vm.read_edict_field_vec(ent, field).unwrap_or_default()
+}
+
+fn model_index_for_name(name: &str, model_list: &[String]) -> i32 {
+    if let Some(rest) = name.strip_prefix('*') {
+        if let Ok(number) = rest.trim().parse::<i32>() {
+            return number + 1;
+        }
+    }
+    for (index, entry) in model_list.iter().enumerate() {
+        if entry.eq_ignore_ascii_case(name) {
+            return index as i32;
+        }
+    }
+    0
 }
 
 fn update_abs_bounds(vm: &mut Vm, ent: usize, fields: QcFields) -> Result<(), VmError> {

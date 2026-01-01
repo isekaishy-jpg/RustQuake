@@ -1,9 +1,9 @@
 use qw_common::{
-    A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, DataPathError, Entity, EntityError, FsError, MoveVars,
-    MsgReadError, MsgReader, Netchan, NetchanError, OobMessage, PORT_SERVER, PROTOCOL_VERSION,
-    QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf, StringListChunk, SvcMessage,
-    UserCmd, build_out_of_band, find_game_dir, find_id1_dir, locate_data_dir, out_of_band_payload,
-    parse_entities, parse_oob_message, write_svc_message,
+    A2A_ACK, A2A_ECHO, Bsp, BspError, Clc, ClientDataMessage, DataPathError, Entity, EntityError,
+    EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError, OobMessage,
+    PORT_SERVER, PROTOCOL_VERSION, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, ServerData, SizeBuf,
+    StringListChunk, SvcMessage, UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir,
+    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -26,18 +26,34 @@ struct ServerInfo {
     lightstyles: Vec<Option<String>>,
 }
 
+#[derive(Clone)]
+struct ServerWorld {
+    static_entities: Vec<EntityState>,
+    static_sounds: Vec<StaticSoundInfo>,
+}
+
+#[derive(Clone)]
+struct StaticSoundInfo {
+    origin: Vec3,
+    sound: u8,
+    volume: u8,
+    attenuation: u8,
+}
+
 struct ClientState {
     netchan: Netchan,
     signon: u8,
     last_heard: Instant,
+    userinfo: String,
 }
 
 impl ClientState {
-    fn new(qport: u16) -> Self {
+    fn new(qport: u16, userinfo: String) -> Self {
         Self {
             netchan: Netchan::new(qport),
             signon: 0,
             last_heard: Instant::now(),
+            userinfo,
         }
     }
 }
@@ -108,8 +124,9 @@ fn run() -> Result<(), ServerError> {
     }
 
     let qc_snapshot = qc::snapshot(&vm);
-    let server_info = build_server_info(&game_name, &map_name, qc_snapshot);
-    run_network(server_info)?;
+    let server_info = build_server_info(&game_name, &map_name, qc_snapshot.clone());
+    let server_world = build_world_snapshot(&vm, &server_info, &qc_snapshot);
+    run_network(server_info, server_world)?;
 
     Ok(())
 }
@@ -205,7 +222,59 @@ fn dedupe_case(list: Vec<String>) -> Vec<String> {
     out
 }
 
-fn run_network(server_info: ServerInfo) -> Result<(), ServerError> {
+fn build_world_snapshot(
+    vm: &Vm,
+    server_info: &ServerInfo,
+    snapshot: &qc::ServerQcSnapshot,
+) -> ServerWorld {
+    let mut static_entities = Vec::new();
+    for ent in &snapshot.static_entities {
+        if let Some(state) = qc::entity_state(vm, *ent, &server_info.model_list) {
+            static_entities.push(state);
+        }
+    }
+
+    let sound_index = build_index_map(&server_info.sound_list);
+    let mut static_sounds = Vec::new();
+    for sound in &snapshot.ambient_sounds {
+        let key = sound.sample.to_ascii_lowercase();
+        let index = sound_index.get(&key).or_else(|| {
+            key.strip_prefix("sound/")
+                .and_then(|name| sound_index.get(name))
+        });
+        let Some(index) = index else {
+            continue;
+        };
+        static_sounds.push(StaticSoundInfo {
+            origin: sound.origin,
+            sound: *index,
+            volume: clamp_u8(sound.volume * 255.0),
+            attenuation: clamp_u8(sound.attenuation * 64.0),
+        });
+    }
+
+    ServerWorld {
+        static_entities,
+        static_sounds,
+    }
+}
+
+fn build_index_map(list: &[String]) -> HashMap<String, u8> {
+    let mut map = HashMap::new();
+    for (index, item) in list.iter().enumerate() {
+        if index > u8::MAX as usize {
+            break;
+        }
+        map.insert(item.to_ascii_lowercase(), index as u8);
+    }
+    map
+}
+
+fn clamp_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+fn run_network(server_info: ServerInfo, server_world: ServerWorld) -> Result<(), ServerError> {
     let bind_addr = format!("0.0.0.0:{PORT_SERVER}");
     let socket = UdpSocket::bind(&bind_addr).map_err(ServerError::Net)?;
     socket
@@ -229,6 +298,7 @@ fn run_network(server_info: ServerInfo) -> Result<(), ServerError> {
                     addr,
                     packet,
                     &server_info,
+                    &server_world,
                     &mut clients,
                     &mut challenges,
                     &mut rng_state,
@@ -253,6 +323,7 @@ fn handle_packet(
     addr: SocketAddr,
     packet: &[u8],
     server_info: &ServerInfo,
+    server_world: &ServerWorld,
     clients: &mut HashMap<SocketAddr, ClientState>,
     challenges: &mut HashMap<SocketAddr, i32>,
     rng_state: &mut u32,
@@ -261,7 +332,7 @@ fn handle_packet(
         return handle_oob(socket, addr, payload, clients, challenges, rng_state);
     }
 
-    handle_inband(socket, addr, packet, server_info, clients)
+    handle_inband(socket, addr, packet, server_info, server_world, clients)
 }
 
 fn handle_oob(
@@ -292,7 +363,7 @@ fn handle_oob(
             if connect.protocol == PROTOCOL_VERSION {
                 let matches = challenges.get(&addr).copied() == Some(connect.challenge);
                 if matches {
-                    clients.insert(addr, ClientState::new(connect._qport));
+                    clients.insert(addr, ClientState::new(connect.qport, connect.userinfo));
                     let packet = build_out_of_band(&[S2C_CONNECTION, 0]);
                     socket.send_to(&packet, addr)?;
                 }
@@ -327,6 +398,7 @@ fn handle_inband(
     addr: SocketAddr,
     packet: &[u8],
     server_info: &ServerInfo,
+    server_world: &ServerWorld,
     clients: &mut HashMap<SocketAddr, ClientState>,
 ) -> Result<(), std::io::Error> {
     let Some(client) = clients.get_mut(&addr) else {
@@ -353,7 +425,7 @@ fn handle_inband(
             Clc::Nop => {}
             Clc::StringCmd => {
                 let text = reader.read_string().map_err(msg_to_io)?;
-                handle_string_cmd(socket, addr, client, server_info, &text)?;
+                handle_string_cmd(socket, addr, client, server_info, server_world, &text)?;
             }
             Clc::Move => {
                 pending = skip_move(&mut reader).map_err(msg_to_io)?;
@@ -382,6 +454,7 @@ fn handle_string_cmd(
     addr: SocketAddr,
     client: &mut ClientState,
     server_info: &ServerInfo,
+    server_world: &ServerWorld,
     text: &str,
 ) -> Result<(), std::io::Error> {
     let mut parts = text.split_whitespace();
@@ -410,7 +483,13 @@ fn handle_string_cmd(
             send_modellist(socket, addr, client, server_info, start)?;
         }
         "prespawn" => {
-            send_prespawn(socket, addr, client)?;
+            send_prespawn(socket, addr, client, server_world)?;
+        }
+        "spawn" => {
+            send_spawn(socket, addr, client, server_info)?;
+        }
+        "begin" => {
+            send_begin(client);
         }
         _ => {}
     }
@@ -474,14 +553,49 @@ fn send_prespawn(
     socket: &UdpSocket,
     addr: SocketAddr,
     client: &mut ClientState,
+    server_world: &ServerWorld,
 ) -> Result<(), std::io::Error> {
+    let mut messages = Vec::new();
+    messages.push(SvcMessage::SignonNum(2));
+    for entity in &server_world.static_entities {
+        messages.push(SvcMessage::SpawnStatic(*entity));
+    }
+    for sound in &server_world.static_sounds {
+        messages.push(SvcMessage::SpawnStaticSound {
+            origin: sound.origin,
+            sound: sound.sound,
+            volume: sound.volume,
+            attenuation: sound.attenuation,
+        });
+    }
+    messages.push(SvcMessage::StuffText("cmd spawn 0 0\n".to_string()));
+    client.signon = 2;
+    send_svc_messages(socket, addr, client, &messages)
+}
+
+fn send_spawn(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    client: &mut ClientState,
+    server_info: &ServerInfo,
+) -> Result<(), std::io::Error> {
+    let mut messages = Vec::new();
+    messages.push(SvcMessage::SignonNum(3));
+    messages.extend(server_info_messages(server_info));
+    messages.push(SvcMessage::UpdateUserInfo {
+        slot: 0,
+        user_id: 1,
+        userinfo: client.userinfo.clone(),
+    });
+    messages.push(SvcMessage::SetView { entity: 1 });
+    messages.push(SvcMessage::ClientData(default_client_data()));
+    messages.push(SvcMessage::StuffText("cmd begin\n".to_string()));
     client.signon = 3;
-    send_svc_messages(
-        socket,
-        addr,
-        client,
-        &[SvcMessage::SignonNum(2), SvcMessage::SignonNum(3)],
-    )
+    send_svc_messages(socket, addr, client, &messages)
+}
+
+fn send_begin(client: &mut ClientState) {
+    client.signon = 3;
 }
 
 fn send_svc_messages(
@@ -533,6 +647,43 @@ fn build_list_chunk(list: &[String], start: u8) -> StringListChunk {
     StringListChunk { start, items, next }
 }
 
+fn server_info_messages(server_info: &ServerInfo) -> Vec<SvcMessage> {
+    vec![
+        SvcMessage::ServerInfo {
+            key: "hostname".to_string(),
+            value: "RustQuake".to_string(),
+        },
+        SvcMessage::ServerInfo {
+            key: "map".to_string(),
+            value: server_info.level_name.clone(),
+        },
+        SvcMessage::ServerInfo {
+            key: "maxclients".to_string(),
+            value: "1".to_string(),
+        },
+    ]
+}
+
+fn default_client_data() -> ClientDataMessage {
+    ClientDataMessage {
+        bits: 0,
+        view_height: 22,
+        ideal_pitch: 0,
+        punch_angle: Vec3::default(),
+        velocity: Vec3::default(),
+        items: 0,
+        onground: false,
+        inwater: false,
+        weapon_frame: 0,
+        armor: 0,
+        weapon: 0,
+        health: 100,
+        ammo: 0,
+        ammo_counts: [0; 4],
+        active_weapon: 0,
+    }
+}
+
 fn skip_move(reader: &mut MsgReader) -> Result<Option<u8>, MsgReadError> {
     let _checksum = reader.read_u8()?;
     let _lost = reader.read_u8()?;
@@ -574,9 +725,9 @@ fn next_challenge(state: &mut u32) -> i32 {
 #[derive(Debug, Clone)]
 struct ConnectInfo {
     protocol: i32,
-    _qport: u16,
+    qport: u16,
     challenge: i32,
-    _userinfo: String,
+    userinfo: String,
 }
 
 fn parse_connect(text: &str) -> Option<ConnectInfo> {
@@ -597,9 +748,9 @@ fn parse_connect(text: &str) -> Option<ConnectInfo> {
     let challenge = parts.next()?.parse::<i32>().ok()?;
     Some(ConnectInfo {
         protocol,
-        _qport: qport,
+        qport,
         challenge,
-        _userinfo: userinfo,
+        userinfo,
     })
 }
 
