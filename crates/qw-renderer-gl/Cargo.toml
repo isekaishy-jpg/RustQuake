@@ -6,3 +6,8 @@ license = "GPL-2.0-only"
 
 [dependencies]
 qw-common = { path = "../qw-common" }
+glow = { version = "0.16.0", optional = true }
+
+[features]
+default = []
+glow = ["dep:glow"]

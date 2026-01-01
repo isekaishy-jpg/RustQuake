@@ -2,6 +2,41 @@ use qw_common::{
     AliasModel, BspRender, FaceVertex, MdlFrame, MdlSkin, Palette, Sprite, SpriteFrame,
     SpriteImage, Vec3,
 };
+#[cfg(feature = "glow")]
+use std::ffi::c_void;
+
+#[cfg(feature = "glow")]
+pub struct GlDevice {
+    gl: glow::Context,
+}
+
+#[cfg(feature = "glow")]
+impl GlDevice {
+    pub unsafe fn from_loader<F>(mut loader: F) -> Self
+    where
+        F: FnMut(&str) -> *const c_void,
+    {
+        let gl = glow::Context::from_loader_function(|name| loader(name));
+        gl.enable(glow::DEPTH_TEST);
+        gl.depth_func(glow::LEQUAL);
+        gl.enable(glow::CULL_FACE);
+        gl.cull_face(glow::BACK);
+        Self { gl }
+    }
+
+    pub unsafe fn clear_color(&self, color: [f32; 4]) {
+        self.gl.clear_color(color[0], color[1], color[2], color[3]);
+    }
+
+    pub unsafe fn clear(&self) {
+        self.gl
+            .clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+    }
+
+    pub unsafe fn viewport(&self, width: i32, height: i32) {
+        self.gl.viewport(0, 0, width, height);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -352,6 +387,8 @@ pub struct GlRenderer {
     last_world: Option<RenderWorld>,
     entities: Vec<RenderEntity>,
     models: Vec<Option<RenderModel>>,
+    #[cfg(feature = "glow")]
+    gl_device: Option<GlDevice>,
     gpu_world: Option<GpuWorld>,
     ui: UiLayer,
 }
@@ -365,6 +402,8 @@ impl GlRenderer {
             last_world: None,
             entities: Vec::new(),
             models: Vec::new(),
+            #[cfg(feature = "glow")]
+            gl_device: None,
             gpu_world: None,
             ui: UiLayer::default(),
         }
@@ -401,6 +440,16 @@ impl GlRenderer {
 
     pub fn models(&self) -> &[Option<RenderModel>] {
         &self.models
+    }
+
+    #[cfg(feature = "glow")]
+    pub fn set_device(&mut self, device: GlDevice) {
+        self.gl_device = Some(device);
+        if let Some(device) = &self.gl_device {
+            unsafe {
+                device.viewport(self.config.width as i32, self.config.height as i32);
+            }
+        }
     }
 
     pub fn resolved_entities(&self, time: f32) -> Vec<ResolvedEntity<'_>> {
@@ -471,10 +520,23 @@ impl Renderer for GlRenderer {
     fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
+        #[cfg(feature = "glow")]
+        if let Some(device) = &self.gl_device {
+            unsafe {
+                device.viewport(self.config.width as i32, self.config.height as i32);
+            }
+        }
     }
 
     fn begin_frame(&mut self) {
         self.frame_index = self.frame_index.wrapping_add(1);
+        #[cfg(feature = "glow")]
+        if let Some(device) = &self.gl_device {
+            unsafe {
+                device.clear_color([0.05, 0.05, 0.05, 1.0]);
+                device.clear();
+            }
+        }
     }
 
     fn end_frame(&mut self) {}
