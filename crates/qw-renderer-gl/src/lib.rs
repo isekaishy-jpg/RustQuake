@@ -1981,10 +1981,10 @@ impl GlRenderer {
                         gl.uniform_1_f32(Some(location), alpha);
                     }
                 }
-                let surface_transparent = surface
-                    .texture_name
-                    .as_deref()
-                    .is_some_and(|name| name.starts_with('{') || name.starts_with('*'));
+                let surface_transparent = matches!(
+                    surface.kind,
+                    RenderSurfaceKind::Masked | RenderSurfaceKind::Liquid(_)
+                );
                 if entity_transparent {
                     if !transparent {
                         continue;
