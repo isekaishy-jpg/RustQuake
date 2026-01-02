@@ -39,6 +39,7 @@ use qw_renderer_gl::GlRenderer;
 use qw_window_glfw::{Action, GlfwWindow, Key, WindowConfig, WindowEvent};
 
 const MOVE_INTERVAL_MS: u64 = 50;
+const EF_DIMLIGHT: i32 = 1 << 3;
 
 fn main() {
     if let Err(err) = run() {
@@ -736,7 +737,7 @@ fn push_render_entity(
         angles,
         frame: ent.frame.max(0) as u32,
         skin: ent.skinnum.max(0) as u32,
-        alpha: 1.0,
+        alpha: entity_alpha(ent),
     });
 }
 
@@ -747,6 +748,14 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
         RenderEntityKind::Sprite
     } else {
         RenderEntityKind::Alias
+    }
+}
+
+fn entity_alpha(ent: &qw_common::EntityState) -> f32 {
+    if ent.effects & EF_DIMLIGHT != 0 {
+        0.5
+    } else {
+        1.0
     }
 }
 

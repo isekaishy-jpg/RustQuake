@@ -341,10 +341,7 @@ pub fn build_draw_list(world: &RenderWorld, entities: &[RenderEntity]) -> Render
 }
 
 fn is_transparent_surface(surface: &RenderSurface) -> bool {
-    matches!(
-        surface.kind,
-        RenderSurfaceKind::Masked | RenderSurfaceKind::Liquid(_)
-    )
+    matches!(surface.kind, RenderSurfaceKind::Liquid(_))
 }
 
 fn surface_kind(name: Option<&str>) -> RenderSurfaceKind {
@@ -405,14 +402,10 @@ fn build_surfaces(
                 } else {
                     vertex.tex_coords
                 },
-                lightmap_coords: if let Some(basis) = lightmap_basis {
-                    [
-                        (vertex.tex_coords[0] - basis.min_s) / 16.0,
-                        (vertex.tex_coords[1] - basis.min_t) / 16.0,
-                    ]
-                } else {
-                    [0.0, 0.0]
-                },
+                lightmap_coords: lightmap_basis
+                    .as_ref()
+                    .map(|basis| lightmap_uv(vertex.tex_coords, basis))
+                    .unwrap_or([0.0, 0.0]),
             })
             .collect::<Vec<_>>();
 
@@ -622,6 +615,18 @@ fn triangulate_fan(vertex_count: usize) -> Vec<u32> {
         indices.push((i + 1) as u32);
     }
     indices
+}
+
+fn lightmap_uv(tex_coords: [f32; 2], basis: &LightmapBasis) -> [f32; 2] {
+    let s = (tex_coords[0] - basis.min_s) / 16.0;
+    let t = (tex_coords[1] - basis.min_t) / 16.0;
+    let width = basis.width as f32;
+    let height = basis.height as f32;
+    if width > 0.0 && height > 0.0 {
+        [(s + 0.5) / width, (t + 0.5) / height]
+    } else {
+        [0.0, 0.0]
+    }
 }
 
 fn build_textures(
@@ -1086,6 +1091,14 @@ mod tests {
                     texture_id: 1,
                     flags: 0,
                 },
+                qw_common::TexInfo {
+                    s_vec: Vec3::new(1.0, 0.0, 0.0),
+                    s_offset: 0.0,
+                    t_vec: Vec3::new(0.0, 1.0, 0.0),
+                    t_offset: 0.0,
+                    texture_id: 2,
+                    flags: 0,
+                },
             ],
             faces: vec![
                 qw_common::Face {
@@ -1106,6 +1119,15 @@ mod tests {
                     styles: [255; 4],
                     light_ofs: -1,
                 },
+                qw_common::Face {
+                    plane_num: 0,
+                    side: 0,
+                    first_edge: 0,
+                    num_edges: 4,
+                    texinfo: 2,
+                    styles: [255; 4],
+                    light_ofs: -1,
+                },
             ],
             textures: vec![
                 qw_common::BspTexture {
@@ -1116,7 +1138,14 @@ mod tests {
                     mip_data: None,
                 },
                 qw_common::BspTexture {
-                    name: "{water".to_string(),
+                    name: "{alpha".to_string(),
+                    width: 64,
+                    height: 64,
+                    offsets: [0; 4],
+                    mip_data: None,
+                },
+                qw_common::BspTexture {
+                    name: "*water".to_string(),
                     width: 64,
                     height: 64,
                     offsets: [0; 4],
@@ -1129,8 +1158,8 @@ mod tests {
 
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
         let draw_list = build_draw_list(&world, &[]);
-        assert_eq!(draw_list.opaque_surfaces, vec![0]);
-        assert_eq!(draw_list.transparent_surfaces, vec![1]);
+        assert_eq!(draw_list.opaque_surfaces, vec![0, 1]);
+        assert_eq!(draw_list.transparent_surfaces, vec![2]);
     }
 
     #[test]
@@ -1446,7 +1475,11 @@ mod tests {
 
         let world = RenderWorld::from_bsp("maps/test.bsp", bsp);
         let lightmap = world.surfaces[0].lightmap.as_ref().unwrap();
-        assert_eq!(world.surfaces[0].vertices[1].lightmap_coords, [2.0, 0.0]);
+        let coords = world.surfaces[0].vertices[1].lightmap_coords;
+        let expected_s = (2.0 + 0.5) / 3.0;
+        let expected_t = (0.0 + 0.5) / 3.0;
+        assert!((coords[0] - expected_s).abs() < 1e-6);
+        assert!((coords[1] - expected_t).abs() < 1e-6);
         assert_eq!(lightmap.width, 3);
         assert_eq!(lightmap.height, 3);
         assert_eq!(lightmap.styles, vec![0]);

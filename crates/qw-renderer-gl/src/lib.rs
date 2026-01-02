@@ -19,6 +19,7 @@ use qw_renderer::{RenderLiquidKind, RenderSurfaceKind};
 use std::cmp::Ordering;
 #[cfg(feature = "glow")]
 use std::ffi::c_void;
+use std::time::Instant;
 
 #[cfg(feature = "glow")]
 pub struct GlDevice {
@@ -313,6 +314,7 @@ struct GlProgram {
     time: Option<glow::UniformLocation>,
     surface_mode: Option<glow::UniformLocation>,
     surface_alpha: Option<glow::UniformLocation>,
+    alpha_cutoff: Option<glow::UniformLocation>,
     view_origin: Option<glow::UniformLocation>,
     gamma: Option<glow::UniformLocation>,
     fog_color: Option<glow::UniformLocation>,
@@ -361,6 +363,7 @@ uniform int u_debug_mode;
 uniform float u_time;
 uniform int u_surface_mode;
 uniform float u_surface_alpha;
+uniform float u_alpha_cutoff;
 uniform vec3 u_view_origin;
 uniform float u_gamma;
 uniform vec3 u_fog_color;
@@ -392,6 +395,9 @@ void main() {
         base = vec4(sky, 1.0);
         fullbright = vec4(0.0);
         light = 1.0;
+    }
+    if (u_alpha_cutoff > 0.0 && base.a < u_alpha_cutoff) {
+        discard;
     }
     vec3 dynamic_light = vec3(0.0);
     if (u_surface_mode != 1) {
@@ -445,6 +451,7 @@ void main() {
         let time = gl.get_uniform_location(program, "u_time");
         let surface_mode = gl.get_uniform_location(program, "u_surface_mode");
         let surface_alpha = gl.get_uniform_location(program, "u_surface_alpha");
+        let alpha_cutoff = gl.get_uniform_location(program, "u_alpha_cutoff");
         let view_origin = gl.get_uniform_location(program, "u_view_origin");
         let gamma = gl.get_uniform_location(program, "u_gamma");
         let fog_color = gl.get_uniform_location(program, "u_fog_color");
@@ -475,6 +482,7 @@ void main() {
             time,
             surface_mode,
             surface_alpha,
+            alpha_cutoff,
             view_origin,
             gamma,
             fog_color,
@@ -1392,6 +1400,8 @@ fn build_gpu_world(world: &RenderWorld) -> GpuWorld {
 pub struct GlRenderer {
     config: RendererConfig,
     frame_index: u64,
+    time_seconds: f32,
+    last_frame_at: Option<Instant>,
     last_view: Option<RenderView>,
     last_world: Option<RenderWorld>,
     entities: Vec<RenderEntity>,
@@ -1429,6 +1439,8 @@ impl GlRenderer {
         Self {
             config,
             frame_index: 0,
+            time_seconds: 0.0,
+            last_frame_at: None,
             last_view: None,
             last_world: None,
             entities: Vec::new(),
@@ -1667,7 +1679,7 @@ impl GlRenderer {
         let frustum = Frustum::from_view_proj(&view_proj);
         let model_identity = Mat4::identity();
         let gl = &device.gl;
-        let time = self.frame_index as f32 * (1.0 / 60.0);
+        let time = self.time_seconds;
         let fog = self.fog_settings.unwrap_or(FogSettings {
             color: [0.0, 0.0, 0.0],
             density: 0.0,
@@ -1688,6 +1700,9 @@ impl GlRenderer {
             }
             if let Some(location) = gl_state.program.surface_alpha.as_ref() {
                 gl.uniform_1_f32(Some(location), 1.0);
+            }
+            if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                gl.uniform_1_f32(Some(location), 0.0);
             }
             if let Some(location) = gl_state.program.view_origin.as_ref() {
                 gl.uniform_3_f32(Some(location), view.origin.x, view.origin.y, view.origin.z);
@@ -1731,6 +1746,10 @@ impl GlRenderer {
                             self.slime_alpha,
                         );
                         gl.uniform_1_f32(Some(location), alpha);
+                    }
+                    if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                        let cutoff = surface_alpha_cutoff(surface);
+                        gl.uniform_1_f32(Some(location), cutoff);
                     }
                 }
                 let Some(draw) = gl_world.draws.get(surface_index) else {
@@ -1790,6 +1809,9 @@ impl GlRenderer {
             if let Some(location) = gl_state.program.surface_alpha.as_ref() {
                 gl.uniform_1_f32(Some(location), 1.0);
             }
+            if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                gl.uniform_1_f32(Some(location), 0.0);
+            }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
             }
@@ -1834,6 +1856,9 @@ impl GlRenderer {
             }
             if let Some(location) = gl_state.program.surface_alpha.as_ref() {
                 gl.uniform_1_f32(Some(location), 1.0);
+            }
+            if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                gl.uniform_1_f32(Some(location), 0.0);
             }
             if let Some(location) = gl_state.program.model.as_ref() {
                 gl.uniform_matrix_4_f32_slice(Some(location), false, &model_identity.data);
@@ -1978,10 +2003,13 @@ impl GlRenderer {
                         gl.uniform_1_f32(Some(location), alpha);
                     }
                 }
-                let surface_transparent = matches!(
-                    surface.kind,
-                    RenderSurfaceKind::Masked | RenderSurfaceKind::Liquid(_)
-                );
+                if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                    let cutoff = surface_alpha_cutoff(surface);
+                    unsafe {
+                        gl.uniform_1_f32(Some(location), cutoff);
+                    }
+                }
+                let surface_transparent = matches!(surface.kind, RenderSurfaceKind::Liquid(_));
                 if entity_transparent {
                     if !transparent {
                         continue;
@@ -2085,6 +2113,9 @@ impl GlRenderer {
                 if let Some(location) = gl_state.program.surface_alpha.as_ref() {
                     gl.uniform_1_f32(Some(location), entity.alpha.clamp(0.0, 1.0));
                 }
+                if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                    gl.uniform_1_f32(Some(location), 0.0);
+                }
                 gl_state.alias_mesh.upload(device, &vertices);
                 gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
                 gl.active_texture(glow::TEXTURE0);
@@ -2112,7 +2143,7 @@ impl GlRenderer {
         time: f32,
     ) {
         let gl = &device.gl;
-        let (_, view_right, view_up) = angle_vectors(view.angles);
+        let (view_forward, view_right, view_up) = angle_vectors(view.angles);
         unsafe {
             gl.disable(glow::CULL_FACE);
         }
@@ -2137,6 +2168,12 @@ impl GlRenderer {
             if !frustum.contains_sphere(entity.origin, radius) {
                 continue;
             }
+            let (sprite_type, beam_length) = match &model.kind {
+                RenderModelKind::Sprite(sprite) => {
+                    (sprite.header.sprite_type, sprite.header.beam_length)
+                }
+                _ => continue,
+            };
             let texture_index = model.texture_index(entity.frame, entity.skin, time);
             let gl_model = self
                 .gl_models
@@ -2150,13 +2187,25 @@ impl GlRenderer {
                 .and_then(|entry| entry.as_ref())
                 .unwrap_or(&gl_state.fallback_fullbright);
 
-            let vertices = build_sprite_vertices(entity, image, view_right, view_up);
+            let vertices = build_sprite_vertices(
+                entity,
+                image,
+                sprite_type,
+                beam_length,
+                view.origin,
+                view_forward,
+                view_right,
+                view_up,
+            );
             if vertices.is_empty() {
                 continue;
             }
             unsafe {
                 if let Some(location) = gl_state.program.surface_alpha.as_ref() {
                     gl.uniform_1_f32(Some(location), entity.alpha.clamp(0.0, 1.0));
+                }
+                if let Some(location) = gl_state.program.alpha_cutoff.as_ref() {
+                    gl.uniform_1_f32(Some(location), 0.0);
                 }
                 gl_state.alias_mesh.upload(device, &vertices);
                 gl.bind_vertex_array(Some(gl_state.alias_mesh.vao));
@@ -2308,6 +2357,11 @@ impl Renderer for GlRenderer {
 
     fn begin_frame(&mut self) {
         self.frame_index = self.frame_index.wrapping_add(1);
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_at {
+            self.time_seconds += (now - last).as_secs_f32();
+        }
+        self.last_frame_at = Some(now);
         #[cfg(feature = "glow")]
         if let Some(device) = &self.gl_device {
             unsafe {
@@ -2371,6 +2425,10 @@ fn transform_alias_vertex(position: Vec3, origin: Vec3, angles: Vec3) -> Vec3 {
 fn build_sprite_vertices(
     entity: &RenderEntity,
     image: &SpriteImage,
+    sprite_type: i32,
+    beam_length: f32,
+    view_origin: Vec3,
+    view_forward: Vec3,
     view_right: Vec3,
     view_up: Vec3,
 ) -> Vec<f32> {
@@ -2379,6 +2437,26 @@ fn build_sprite_vertices(
     if width <= 0.0 || height <= 0.0 {
         return Vec::new();
     }
+
+    let (right_axis, up_axis, forward_axis) = match sprite_axes(
+        sprite_type,
+        entity,
+        view_origin,
+        view_forward,
+        view_right,
+        view_up,
+    ) {
+        Some(axes) => axes,
+        None => return Vec::new(),
+    };
+    let mut origin = entity.origin;
+    if beam_length != 0.0 {
+        origin = Vec3::new(
+            origin.x - forward_axis.x * beam_length,
+            origin.y - forward_axis.y * beam_length,
+            origin.z - forward_axis.z * beam_length,
+        );
+    }
     let left = -(image.origin.0 as f32);
     let top = -(image.origin.1 as f32);
     let right = left + width;
@@ -2386,9 +2464,9 @@ fn build_sprite_vertices(
 
     let make_point = |x: f32, y: f32| {
         Vec3::new(
-            entity.origin.x + view_right.x * x + view_up.x * y,
-            entity.origin.y + view_right.y * x + view_up.y * y,
-            entity.origin.z + view_right.z * x + view_up.z * y,
+            origin.x + right_axis.x * x + up_axis.x * y,
+            origin.y + right_axis.y * x + up_axis.y * y,
+            origin.z + right_axis.z * x + up_axis.z * y,
         )
     };
 
@@ -2405,6 +2483,91 @@ fn build_sprite_vertices(
     vertices.extend_from_slice(&[p2.x, p2.y, p2.z, 1.0, 1.0, 0.0, 0.0]);
     vertices.extend_from_slice(&[p3.x, p3.y, p3.z, 0.0, 1.0, 0.0, 0.0]);
     vertices
+}
+
+#[cfg(feature = "glow")]
+const SPR_VP_PARALLEL_UPRIGHT: i32 = 0;
+#[cfg(feature = "glow")]
+const SPR_FACING_UPRIGHT: i32 = 1;
+#[cfg(feature = "glow")]
+const SPR_VP_PARALLEL: i32 = 2;
+#[cfg(feature = "glow")]
+const SPR_ORIENTED: i32 = 3;
+#[cfg(feature = "glow")]
+const SPR_VP_PARALLEL_ORIENTED: i32 = 4;
+#[cfg(feature = "glow")]
+const SPR_UPRIGHT_DOT_LIMIT: f32 = 0.999848;
+
+#[cfg(feature = "glow")]
+fn sprite_axes(
+    sprite_type: i32,
+    entity: &RenderEntity,
+    view_origin: Vec3,
+    view_forward: Vec3,
+    view_right: Vec3,
+    view_up: Vec3,
+) -> Option<(Vec3, Vec3, Vec3)> {
+    match sprite_type {
+        SPR_FACING_UPRIGHT => {
+            let to_view = Vec3::new(
+                view_origin.x - entity.origin.x,
+                view_origin.y - entity.origin.y,
+                view_origin.z - entity.origin.z,
+            );
+            let to_view = normalize(to_view)?;
+            if to_view.z.abs() > SPR_UPRIGHT_DOT_LIMIT {
+                return None;
+            }
+            let up = Vec3::new(0.0, 0.0, 1.0);
+            let right = normalize(Vec3::new(to_view.y, -to_view.x, 0.0))?;
+            let forward = Vec3::new(-right.y, right.x, 0.0);
+            Some((right, up, forward))
+        }
+        SPR_VP_PARALLEL => Some((view_right, view_up, view_forward)),
+        SPR_VP_PARALLEL_UPRIGHT => {
+            if view_forward.z.abs() > SPR_UPRIGHT_DOT_LIMIT {
+                return None;
+            }
+            let up = Vec3::new(0.0, 0.0, 1.0);
+            let right = normalize(Vec3::new(view_forward.y, -view_forward.x, 0.0))?;
+            let forward = Vec3::new(-right.y, right.x, 0.0);
+            Some((right, up, forward))
+        }
+        SPR_ORIENTED => {
+            let (forward, right, up) = angle_vectors(entity.angles);
+            Some((right, up, forward))
+        }
+        SPR_VP_PARALLEL_ORIENTED => {
+            let angle = entity.angles.z.to_radians();
+            let (sr, cr) = angle.sin_cos();
+            let right = Vec3::new(
+                view_right.x * cr + view_up.x * sr,
+                view_right.y * cr + view_up.y * sr,
+                view_right.z * cr + view_up.z * sr,
+            );
+            let up = Vec3::new(
+                view_right.x * -sr + view_up.x * cr,
+                view_right.y * -sr + view_up.y * cr,
+                view_right.z * -sr + view_up.z * cr,
+            );
+            Some((right, up, view_forward))
+        }
+        _ => Some((view_right, view_up, view_forward)),
+    }
+}
+
+#[cfg(feature = "glow")]
+fn normalize(value: Vec3) -> Option<Vec3> {
+    let len_sq = value.x * value.x + value.y * value.y + value.z * value.z;
+    if len_sq <= 0.0 {
+        return None;
+    }
+    let inv_len = len_sq.sqrt().recip();
+    Some(Vec3::new(
+        value.x * inv_len,
+        value.y * inv_len,
+        value.z * inv_len,
+    ))
 }
 
 #[cfg(feature = "glow")]
@@ -2545,6 +2708,15 @@ fn surface_alpha(surface: &RenderSurface, water: f32, lava: f32, slime: f32) -> 
         RenderSurfaceKind::Liquid(RenderLiquidKind::Slime) => slime,
         RenderSurfaceKind::Liquid(RenderLiquidKind::Water) => water,
         _ => 1.0,
+    }
+}
+
+#[cfg(feature = "glow")]
+fn surface_alpha_cutoff(surface: &RenderSurface) -> f32 {
+    if matches!(surface.kind, RenderSurfaceKind::Masked) {
+        0.5
+    } else {
+        0.0
     }
 }
 
