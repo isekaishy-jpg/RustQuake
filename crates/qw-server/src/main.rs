@@ -1,12 +1,13 @@
 use qw_common::{
-    A2A_ACK, A2A_ECHO, Bsp, BspCollision, BspError, Clc, ClientDataMessage, DataPathError, Entity,
-    EntityDelta, EntityError, EntityState, FsError, MoveVars, MsgReadError, MsgReader, Netchan,
-    NetchanError, OobMessage, PF_COMMAND, PF_MSEC, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3,
-    PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs, S2C_CHALLENGE,
-    S2C_CONNECTION, SU_VELOCITY1, SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT, ServerData, SizeBuf,
-    StringListChunk, SvcMessage, UPDATE_MASK, UserCmd, Vec3, build_out_of_band, find_game_dir,
-    find_id1_dir, locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message,
-    trace_hull, write_svc_message,
+    A2A_ACK, A2A_ECHO, Bsp, BspCollision, BspError, CONTENTS_LAVA, CONTENTS_SLIME, CONTENTS_WATER,
+    Clc, ClientDataMessage, DataPathError, Entity, EntityDelta, EntityError, EntityState, FsError,
+    MoveVars, MsgReadError, MsgReader, Netchan, NetchanError, OobMessage, PF_COMMAND, PF_MSEC,
+    PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate,
+    PlayerInfoMessage, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, SU_VELOCITY1, SU_VELOCITY2,
+    SU_VELOCITY3, SU_VIEWHEIGHT, ServerData, SizeBuf, StringListChunk, SvcMessage, UPDATE_MASK,
+    UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir, hull_point_contents,
+    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, trace_hull,
+    write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -61,6 +62,7 @@ struct ClientState {
     last_packet_sequence: Option<u32>,
     player_hull: usize,
     on_ground: bool,
+    in_water: bool,
 }
 
 impl ClientState {
@@ -80,6 +82,7 @@ impl ClientState {
             last_packet_sequence: None,
             player_hull: 1,
             on_ground: false,
+            in_water: false,
         }
     }
 }
@@ -701,6 +704,7 @@ fn send_spawn(
     client.last_packet_sequence = None;
     client.player_hull = 1;
     client.on_ground = true;
+    client.in_water = false;
 
     let mut messages = Vec::new();
     messages.push(SvcMessage::SignonNum(3));
@@ -873,6 +877,7 @@ fn build_client_data(client: &ClientState) -> ClientDataMessage {
     data.bits = SU_VIEWHEIGHT | SU_VELOCITY1 | SU_VELOCITY2 | SU_VELOCITY3;
     data.velocity = client.player_velocity;
     data.onground = client.on_ground;
+    data.inwater = client.in_water;
     data
 }
 
@@ -1053,15 +1058,32 @@ fn apply_move(
         client.player_origin.z + velocity.z * dt,
     );
 
-    let trace = collision
-        .and_then(|world| world.hull(0, client.player_hull))
-        .map(|hull| trace_hull(&hull, start, end));
-    let endpos = trace.map(|hit| hit.endpos).unwrap_or(end);
-    let mut on_ground = trace
-        .map(|hit| hit.fraction < 1.0 && hit.plane.normal.z > 0.7)
-        .unwrap_or(false);
+    let mut on_ground = false;
+    let (endpos, end_velocity) =
+        if let Some(hull) = collision.and_then(|world| world.hull(0, client.player_hull)) {
+            let first = trace_hull(&hull, start, end);
+            if first.fraction < 1.0 {
+                on_ground = first.plane.normal.z > 0.7;
+                let slide_vel = slide_velocity(velocity, first.plane.normal);
+                let remaining = (1.0 - first.fraction) * dt;
+                let slide_end = Vec3::new(
+                    first.endpos.x + slide_vel.x * remaining,
+                    first.endpos.y + slide_vel.y * remaining,
+                    first.endpos.z + slide_vel.z * remaining,
+                );
+                let second = trace_hull(&hull, first.endpos, slide_end);
+                if second.fraction < 1.0 && second.plane.normal.z > 0.7 {
+                    on_ground = true;
+                }
+                (second.endpos, slide_vel)
+            } else {
+                (first.endpos, velocity)
+            }
+        } else {
+            (end, velocity)
+        };
 
-    client.player_velocity = velocity;
+    client.player_velocity = end_velocity;
     client.player_origin = endpos;
     if client.player_origin.z <= client.ground_z {
         client.player_origin.z = client.ground_z;
@@ -1071,6 +1093,13 @@ fn apply_move(
         client.player_velocity.z = 0.0;
     }
     client.on_ground = on_ground;
+    client.in_water = collision
+        .and_then(|world| world.hull(0, client.player_hull))
+        .map(|hull| {
+            let contents = hull_point_contents(&hull, hull.firstclipnode, client.player_origin);
+            matches!(contents, CONTENTS_WATER | CONTENTS_SLIME | CONTENTS_LAVA)
+        })
+        .unwrap_or(false);
 }
 
 fn vec_length(vec: Vec3) -> f32 {
@@ -1115,6 +1144,15 @@ fn apply_accel(velocity: Vec3, wish: Vec3, maxspeed: f32, accel: f32, dt: f32) -
         velocity.x + wish_dir.x * accel_speed,
         velocity.y + wish_dir.y * accel_speed,
         velocity.z + wish_dir.z * accel_speed,
+    )
+}
+
+fn slide_velocity(velocity: Vec3, normal: Vec3) -> Vec3 {
+    let backoff = velocity.dot(normal);
+    Vec3::new(
+        velocity.x - normal.x * backoff,
+        velocity.y - normal.y * backoff,
+        velocity.z - normal.z * backoff,
     )
 }
 
@@ -1365,6 +1403,16 @@ mod tests {
         apply_move(&movevars, None, &mut client, cmd);
         assert_close(client.player_velocity.x, 100.0);
         assert_close(client.player_origin.x, 10.0);
+    }
+
+    #[test]
+    fn slide_velocity_removes_normal_component() {
+        let velocity = Vec3::new(10.0, 5.0, 0.0);
+        let normal = Vec3::new(1.0, 0.0, 0.0);
+        let slid = slide_velocity(velocity, normal);
+        assert_close(slid.x, 0.0);
+        assert_close(slid.y, 5.0);
+        assert_close(slid.z, 0.0);
     }
 
     #[test]
