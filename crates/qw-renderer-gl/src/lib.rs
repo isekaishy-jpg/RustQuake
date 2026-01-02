@@ -14,6 +14,8 @@ use qw_renderer::{
     RenderEntityKind, RenderModelFrame, RenderModelKind, RenderModelTexture, UiText,
 };
 #[cfg(feature = "glow")]
+use qw_renderer::{RenderLiquidKind, RenderSurfaceKind};
+#[cfg(feature = "glow")]
 use std::cmp::Ordering;
 #[cfg(feature = "glow")]
 use std::ffi::c_void;
@@ -2541,19 +2543,11 @@ unsafe fn set_dynamic_light_uniforms(
 
 #[cfg(feature = "glow")]
 fn surface_alpha(surface: &RenderSurface, water: f32, lava: f32, slime: f32) -> f32 {
-    let Some(name) = surface.texture_name.as_deref() else {
-        return 1.0;
-    };
-    if !name.starts_with('*') {
-        return 1.0;
-    }
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("lava") {
-        lava
-    } else if lower.contains("slime") {
-        slime
-    } else {
-        water
+    match surface.kind {
+        RenderSurfaceKind::Liquid(RenderLiquidKind::Lava) => lava,
+        RenderSurfaceKind::Liquid(RenderLiquidKind::Slime) => slime,
+        RenderSurfaceKind::Liquid(RenderLiquidKind::Water) => water,
+        _ => 1.0,
     }
 }
 
@@ -2593,22 +2587,11 @@ fn distance_sq(a: Vec3, b: Vec3) -> f32 {
 
 #[cfg(feature = "glow")]
 fn surface_mode(surface: &RenderSurface) -> i32 {
-    let Some(name) = surface.texture_name.as_deref() else {
-        return 0;
-    };
-    if is_sky_name(name) {
-        1
-    } else if name.starts_with('*') {
-        2
-    } else {
-        0
+    match surface.kind {
+        RenderSurfaceKind::Sky => 1,
+        RenderSurfaceKind::Liquid(_) => 2,
+        _ => 0,
     }
-}
-
-#[cfg(feature = "glow")]
-fn is_sky_name(name: &str) -> bool {
-    name.get(0..3)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sky"))
 }
 
 #[cfg(test)]

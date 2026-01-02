@@ -41,12 +41,28 @@ pub struct RenderVertex {
     pub lightmap_coords: [f32; 2],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderSurfaceKind {
+    Opaque,
+    Masked,
+    Sky,
+    Liquid(RenderLiquidKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderLiquidKind {
+    Water,
+    Slime,
+    Lava,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderSurface {
     pub vertices: Vec<RenderVertex>,
     pub indices: Vec<u32>,
     pub texture_index: Option<usize>,
     pub texture_name: Option<String>,
+    pub kind: RenderSurfaceKind,
     pub lightmap: Option<RenderLightmap>,
     pub bounds: RenderBounds,
 }
@@ -325,10 +341,37 @@ pub fn build_draw_list(world: &RenderWorld, entities: &[RenderEntity]) -> Render
 }
 
 fn is_transparent_surface(surface: &RenderSurface) -> bool {
-    surface
-        .texture_name
-        .as_deref()
-        .is_some_and(|name| name.starts_with('{') || name.starts_with('*'))
+    matches!(
+        surface.kind,
+        RenderSurfaceKind::Masked | RenderSurfaceKind::Liquid(_)
+    )
+}
+
+fn surface_kind(name: Option<&str>) -> RenderSurfaceKind {
+    let Some(name) = name else {
+        return RenderSurfaceKind::Opaque;
+    };
+    if name.starts_with('{') {
+        return RenderSurfaceKind::Masked;
+    }
+    if name.starts_with('*') {
+        let lower = name.to_ascii_lowercase();
+        let liquid = if lower.contains("lava") {
+            RenderLiquidKind::Lava
+        } else if lower.contains("slime") {
+            RenderLiquidKind::Slime
+        } else {
+            RenderLiquidKind::Water
+        };
+        return RenderSurfaceKind::Liquid(liquid);
+    }
+    if name
+        .get(0..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sky"))
+    {
+        return RenderSurfaceKind::Sky;
+    }
+    RenderSurfaceKind::Opaque
 }
 
 fn is_transparent_entity(entity: &RenderEntity) -> bool {
@@ -377,11 +420,13 @@ fn build_surfaces(
         let texture_index = texture_index_for_face(bsp, face, texture_map);
         let indices = triangulate_fan(vertices.len());
         let bounds = bounds_for_vertices(&vertices);
+        let kind = surface_kind(texture_name.as_deref());
         surfaces.push(RenderSurface {
             vertices,
             indices,
             texture_index,
             texture_name,
+            kind,
             lightmap,
             bounds,
         });
@@ -1586,5 +1631,24 @@ mod tests {
         let world = RenderWorld::from_bsp_with_palette("maps/test.bsp", bsp, Some(&palette));
         assert_eq!(world.animated_texture_index(0, 0.0), Some(0));
         assert_eq!(world.animated_texture_index(0, 0.11), Some(1));
+    }
+
+    #[test]
+    fn classifies_surface_kinds() {
+        assert_eq!(surface_kind(None), RenderSurfaceKind::Opaque);
+        assert_eq!(surface_kind(Some("{alpha")), RenderSurfaceKind::Masked);
+        assert_eq!(surface_kind(Some("sky1")), RenderSurfaceKind::Sky);
+        assert_eq!(
+            surface_kind(Some("*water")),
+            RenderSurfaceKind::Liquid(RenderLiquidKind::Water)
+        );
+        assert_eq!(
+            surface_kind(Some("*slime")),
+            RenderSurfaceKind::Liquid(RenderLiquidKind::Slime)
+        );
+        assert_eq!(
+            surface_kind(Some("*lava")),
+            RenderSurfaceKind::Liquid(RenderLiquidKind::Lava)
+        );
     }
 }
