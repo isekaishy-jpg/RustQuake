@@ -1886,10 +1886,7 @@ impl GlRenderer {
             if entity.model_index == 0 {
                 continue;
             }
-            let brush_index = entity.model_index.saturating_sub(1);
-            if brush_index == 0 {
-                continue;
-            }
+            let brush_index = entity.model_index;
             let Some(brush_model) = world.brush_models.get(brush_index) else {
                 continue;
             };

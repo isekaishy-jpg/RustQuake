@@ -707,11 +707,19 @@ fn push_render_entity(
     if ent.modelindex <= 0 {
         return;
     }
-    let model_index = ent.modelindex as usize;
-    let Some(name) = models.get(model_index) else {
+    let precache_index = ent.modelindex as usize;
+    let Some(name) = models.get(precache_index) else {
         return;
     };
     let kind = model_kind_from_name(name);
+    let model_index = if kind == RenderEntityKind::Brush {
+        let Some(index) = brush_model_index_from_name(name) else {
+            return;
+        };
+        index
+    } else {
+        precache_index
+    };
     let origin = match prev {
         Some(previous) => lerp_vec3(previous.origin, ent.origin, frac),
         None => ent.origin,
@@ -740,6 +748,11 @@ fn model_kind_from_name(name: &str) -> RenderEntityKind {
     } else {
         RenderEntityKind::Alias
     }
+}
+
+fn brush_model_index_from_name(name: &str) -> Option<usize> {
+    let rest = name.strip_prefix('*')?;
+    rest.trim().parse::<usize>().ok()
 }
 
 fn build_render_models(models: &[Option<ModelAsset>]) -> Vec<Option<RenderModel>> {
