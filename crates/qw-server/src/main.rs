@@ -1,13 +1,13 @@
 use qw_common::{
     A2A_ACK, A2A_ECHO, Bsp, BspCollision, BspError, CONTENTS_LAVA, CONTENTS_SLIME, CONTENTS_WATER,
     Clc, ClientDataMessage, DataPathError, Entity, EntityDelta, EntityError, EntityState, FsError,
-    MoveVars, MsgReadError, MsgReader, Netchan, NetchanError, OobMessage, PF_COMMAND, PF_MSEC,
-    PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3, PORT_SERVER, PROTOCOL_VERSION, PacketEntitiesUpdate,
-    PlayerInfoMessage, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, SU_VELOCITY1, SU_VELOCITY2,
-    SU_VELOCITY3, SU_VIEWHEIGHT, ServerData, SizeBuf, StringListChunk, SvcMessage, UPDATE_MASK,
-    UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir, hull_point_contents,
-    locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message, trace_hull,
-    write_svc_message,
+    Hull, MoveVars, MsgReadError, MsgReader, Netchan, NetchanError, OobMessage, PF_COMMAND,
+    PF_MSEC, PF_VELOCITY1, PF_VELOCITY2, PF_VELOCITY3, PORT_SERVER, PROTOCOL_VERSION,
+    PacketEntitiesUpdate, PlayerInfoMessage, QuakeFs, S2C_CHALLENGE, S2C_CONNECTION, SU_VELOCITY1,
+    SU_VELOCITY2, SU_VELOCITY3, SU_VIEWHEIGHT, ServerData, SizeBuf, StringListChunk, SvcMessage,
+    UPDATE_MASK, UserCmd, Vec3, build_out_of_band, find_game_dir, find_id1_dir,
+    hull_point_contents, locate_data_dir, out_of_band_payload, parse_entities, parse_oob_message,
+    trace_hull, write_svc_message,
 };
 use qw_qc::{ProgsDat, ProgsError, Vm, VmError};
 use std::collections::HashMap;
@@ -63,6 +63,7 @@ struct ClientState {
     player_hull: usize,
     on_ground: bool,
     in_water: bool,
+    water_level: u8,
 }
 
 impl ClientState {
@@ -83,6 +84,7 @@ impl ClientState {
             player_hull: 1,
             on_ground: false,
             in_water: false,
+            water_level: 0,
         }
     }
 }
@@ -705,6 +707,7 @@ fn send_spawn(
     client.player_hull = 1;
     client.on_ground = true;
     client.in_water = false;
+    client.water_level = 0;
 
     let mut messages = Vec::new();
     messages.push(SvcMessage::SignonNum(3));
@@ -883,6 +886,40 @@ fn build_client_data(client: &ClientState) -> ClientDataMessage {
 
 fn delta_from_sequence(seq: u32) -> u8 {
     (seq & UPDATE_MASK as u32) as u8
+}
+
+fn is_water_contents(contents: i32) -> bool {
+    matches!(contents, CONTENTS_WATER | CONTENTS_SLIME | CONTENTS_LAVA)
+}
+
+fn water_level_for(origin: Vec3, hull: &Hull<'_>) -> u8 {
+    let foot = Vec3::new(origin.x, origin.y, origin.z + hull.clip_mins.z + 1.0);
+    let mid = Vec3::new(
+        origin.x,
+        origin.y,
+        origin.z + (hull.clip_mins.z + hull.clip_maxs.z) * 0.5,
+    );
+    let head = Vec3::new(origin.x, origin.y, origin.z + hull.clip_maxs.z - 1.0);
+    water_level_for_points(foot, mid, head, |pos| {
+        hull_point_contents(hull, hull.firstclipnode, pos)
+    })
+}
+
+fn water_level_for_points<F>(foot: Vec3, mid: Vec3, head: Vec3, contents: F) -> u8
+where
+    F: Fn(Vec3) -> i32,
+{
+    let mut level = 0;
+    if is_water_contents(contents(foot)) {
+        level = 1;
+        if is_water_contents(contents(mid)) {
+            level = 2;
+            if is_water_contents(contents(head)) {
+                level = 3;
+            }
+        }
+    }
+    level
 }
 
 fn maybe_send_frame(
@@ -1093,13 +1130,14 @@ fn apply_move(
         client.player_velocity.z = 0.0;
     }
     client.on_ground = on_ground;
-    client.in_water = collision
-        .and_then(|world| world.hull(0, client.player_hull))
-        .map(|hull| {
-            let contents = hull_point_contents(&hull, hull.firstclipnode, client.player_origin);
-            matches!(contents, CONTENTS_WATER | CONTENTS_SLIME | CONTENTS_LAVA)
-        })
-        .unwrap_or(false);
+    if let Some(hull) = collision.and_then(|world| world.hull(0, client.player_hull)) {
+        let level = water_level_for(client.player_origin, &hull);
+        client.water_level = level;
+        client.in_water = level > 0;
+    } else {
+        client.water_level = 0;
+        client.in_water = false;
+    }
 }
 
 fn vec_length(vec: Vec3) -> f32 {
@@ -1413,6 +1451,21 @@ mod tests {
         assert_close(slid.x, 0.0);
         assert_close(slid.y, 5.0);
         assert_close(slid.z, 0.0);
+    }
+
+    #[test]
+    fn water_level_counts_layers() {
+        let foot = Vec3::new(0.0, 0.0, 0.0);
+        let mid = Vec3::new(0.0, 0.0, 1.0);
+        let head = Vec3::new(0.0, 0.0, 2.0);
+        let contents = |pos: Vec3| {
+            if pos.z < 2.0 {
+                CONTENTS_WATER
+            } else {
+                CONTENTS_EMPTY
+            }
+        };
+        assert_eq!(water_level_for_points(foot, mid, head, contents), 2);
     }
 
     #[test]
